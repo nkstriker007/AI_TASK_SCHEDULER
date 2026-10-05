@@ -1,0 +1,43 @@
+{
+  "request_id": "req_fixture_join",
+  "created_at": "2026-09-28T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "A -> C, B -> C",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "Task t1",
+        "instruction": "Do the work for t1.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2
+        }
+      },
+      {
+        "id": "t2",
+        "type": "research",
+        "title": "Task t2",
+        "instruction": "Do the work for t2.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 3
+        }
+      },
+      {
+        "id": "t3",
+        "type": "compare",
+        "title": "Task t3",
+        "instruction": "Do the work for t3.",
+        "depends_on": [
+          "t1",
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 1
+        }
+      }
+    ]
+  }
+}

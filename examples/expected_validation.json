@@ -1,0 +1,76 @@
+{
+  "chain": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "fork": {
+    "valid": true,
+    "errors": [],
+    "warnings": [
+      "MULTIPLE_SINKS"
+    ]
+  },
+  "join": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "diamond": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "two_components": {
+    "valid": true,
+    "errors": [],
+    "warnings": [
+      "MULTIPLE_SINKS"
+    ]
+  },
+  "company_research": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "expand_canned": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "invalid_unknown_dep": {
+    "valid": false,
+    "errors": [
+      "UNKNOWN_DEPENDENCY"
+    ],
+    "warnings": []
+  },
+  "invalid_self_dep": {
+    "valid": false,
+    "errors": [
+      "SELF_DEPENDENCY"
+    ],
+    "warnings": []
+  },
+  "invalid_cycle": {
+    "valid": false,
+    "errors": [
+      "CYCLE"
+    ],
+    "warnings": []
+  },
+  "invalid_duplicate_id": {
+    "valid": false,
+    "errors": [
+      "DUPLICATE_ID"
+    ],
+    "warnings": []
+  },
+  "invalid_missing_field": {
+    "valid": false,
+    "errors": [
+      "SCHEMA"
+    ],
+    "warnings": []
+  }
+}

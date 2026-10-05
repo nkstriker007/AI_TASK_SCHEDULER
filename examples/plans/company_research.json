@@ -1,0 +1,79 @@
+{
+  "request_id": "req_fixture_company_research",
+  "created_at": "2026-09-28T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "Research and compare Apple and NVIDIA, then write a report",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "Research Apple",
+        "instruction": "Collect Apple's most recent financial results and major developments.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 20
+        }
+      },
+      {
+        "id": "t2",
+        "type": "research",
+        "title": "Research NVIDIA",
+        "instruction": "Collect NVIDIA's most recent financial results and major developments.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 25
+        }
+      },
+      {
+        "id": "t3",
+        "type": "summarize",
+        "title": "Summarize Apple developments",
+        "instruction": "Summarize the key recent developments from the Apple research.",
+        "depends_on": [
+          "t1"
+        ],
+        "hints": {
+          "estimated_seconds": 10
+        }
+      },
+      {
+        "id": "t4",
+        "type": "summarize",
+        "title": "Summarize NVIDIA developments",
+        "instruction": "Summarize the key recent developments from the NVIDIA research.",
+        "depends_on": [
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 10
+        }
+      },
+      {
+        "id": "t5",
+        "type": "compare",
+        "title": "Compare Apple and NVIDIA",
+        "instruction": "Compare financial performance and recent developments.",
+        "depends_on": [
+          "t3",
+          "t4"
+        ],
+        "hints": {
+          "estimated_seconds": 15
+        }
+      },
+      {
+        "id": "t6",
+        "type": "report",
+        "title": "Write final report",
+        "instruction": "Write a concise report presenting the comparison.",
+        "depends_on": [
+          "t5"
+        ],
+        "hints": {
+          "estimated_seconds": 15
+        }
+      }
+    ]
+  }
+}
