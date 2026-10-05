@@ -30,10 +30,17 @@ uv run python -m planner.export_schemas                                         
 cd .. && uv run --project planner pytest tests/test_parity.py                      # Python vs C++ parity
 ```
 
-Live planning with Groq: copy `.env.example` to `.env`, set `GROQ_API_KEY`, export it, then
+Live planning with Groq: create `.env` in the repo root (it is gitignored) with
 
 ```bash
-cd planner && uv run python -m planner.cli "Research Apple and NVIDIA and compare them" -o plan.json
+GROQ_API_KEY=<your key>
+ATS_PLANNER_MODEL=openai/gpt-oss-120b   # optional, this is the default
+```
+
+The planner does not load `.env` itself, so pass it with `--env-file`:
+
+```bash
+cd planner && uv run --env-file ../.env python -m planner.cli "Research Apple and NVIDIA and compare them" -o plan.json
 ```
 
 CLI exit codes: 0 plan written, 1 plan rejected by the validator, 2 provider error.
