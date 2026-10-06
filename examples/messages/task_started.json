@@ -1,0 +1,6 @@
+{
+  "event": "task_started",
+  "attempt_id": "req_2f9c1a7e:t5:2",
+  "worker_id": "w-3",
+  "ts_ms": 1759112280500
+}

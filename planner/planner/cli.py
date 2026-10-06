@@ -53,9 +53,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from groq import GroqError
 
+    planner = build_planner(args)
     try:
-        plan = build_planner(args).generate_plan(args.request)
+        plan = planner.generate_plan(args.request)
     except PlanRejected as exc:
+        print("plan rejected after one repair attempt", file=sys.stderr)
         print(exc, file=sys.stderr)
         if exc.raw is not None:
             print("raw output:\n" + (exc.raw if isinstance(exc.raw, str) else json.dumps(exc.raw, indent=2)),
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider error: {exc}", file=sys.stderr)
         return 2
 
+    if planner.last_attempts > 1:
+        print("first plan failed validation; repaired on the second attempt", file=sys.stderr)
     for warning in validate_plan(plan.model_dump(mode="json", exclude_none=True)).warnings:
         print(warning, file=sys.stderr)
 

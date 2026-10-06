@@ -22,29 +22,67 @@ def test_fake_planner_returns_fixture():
     assert len(plan.tasks) == 6
 
 
-def test_fake_planner_script_and_rejection():
+def cyclic_plan():
     bad = load_fixture_plan("company_research")
     bad["tasks"][0]["depends_on"] = ["t6"]  # creates a cycle
-    fake = FakePlanner(script=[bad])
+    return bad
+
+
+# --- repair loop: one retry with the issue list, then reject ------------------
+
+
+def test_valid_first_plan_needs_no_repair():
+    fake = FakePlanner()
+    fake.generate_plan("req")
+    assert fake.calls == [("req", None)]
+    assert fake.last_attempts == 1
+
+
+def test_repair_succeeds_on_second_attempt():
+    fake = FakePlanner(script=[cyclic_plan()])  # bad plan first, default (good) plan second
+    plan = fake.generate_plan("req")
+    assert plan.tasks[0].depends_on == []
+    assert fake.last_attempts == 2
+    [(req1, fb1), (req2, fb2)] = fake.calls
+    assert (req1, fb1) == ("req", None)
+    assert req2 == "req" and [i.code.value for i in fb2] == ["CYCLE"]
+
+
+def test_repair_failure_rejects_with_second_attempts_issues():
+    unknown_dep = load_fixture_plan("company_research")
+    unknown_dep["tasks"][2]["depends_on"] = ["t42"]
+    fake = FakePlanner(script=[cyclic_plan(), unknown_dep])
     with pytest.raises(PlanRejected) as exc:
         fake.generate_plan("req")
-    assert [i.code.value for i in exc.value.issues] == ["CYCLE"]
-    assert fake.generate_plan("req").tasks[0].depends_on == []  # script exhausted -> default
-    assert [c[0] for c in fake.calls] == ["req", "req"]
+    assert [i.code.value for i in exc.value.issues] == ["UNKNOWN_DEPENDENCY"]
+    assert exc.value.raw == unknown_dep
+    assert len(fake.calls) == 2  # exactly one repair, never more
+
+
+def test_repair_feedback_excludes_warnings():
+    fork = load_fixture_plan("fork")  # valid, but MULTIPLE_SINKS warning
+    fork["tasks"][1]["depends_on"].append("t1")  # DUPLICATE_DEPENDENCY error
+    fake = FakePlanner(script=[fork])
+    fake.generate_plan("req")
+    assert [i.code.value for i in fake.calls[1][1]] == ["DUPLICATE_DEPENDENCY"]
 
 
 # --- Groq planner (fake client, no network) -----------------------------------
 
 
 class FakeGroqClient:
+    """Returns `content` for every call, or the next item when given a list."""
+
     def __init__(self, content):
+        self.contents = list(content) if isinstance(content, list) else None
         self.content = content
         self.requests = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         self.requests.append(kwargs)
-        msg = SimpleNamespace(content=self.content)
+        content = self.contents.pop(0) if self.contents is not None else self.content
+        msg = SimpleNamespace(content=content)
         return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None)
 
 
@@ -72,18 +110,38 @@ def test_groq_planner_request_shape_and_normalization():
     assert fmt["type"] == "json_schema" and fmt["json_schema"]["strict"] is True
 
 
-def test_groq_planner_invalid_json_is_rejected():
+def test_groq_planner_invalid_json_is_rejected_after_one_repair():
+    client = FakeGroqClient("{not json")
     with pytest.raises(PlanRejected) as exc:
-        GroqPlanner(client=FakeGroqClient("{not json")).generate_plan("x")
+        GroqPlanner(client=client).generate_plan("x")
     assert exc.value.issues[0].code.value == "SCHEMA"
+    assert len(client.requests) == 2
 
 
 def test_groq_planner_semantic_errors_are_rejected():
     plan = llm_style_plan()
     plan["tasks"][2]["depends_on"] = ["t42"]
+    client = FakeGroqClient(json.dumps(plan))
     with pytest.raises(PlanRejected) as exc:
-        GroqPlanner(client=FakeGroqClient(json.dumps(plan))).generate_plan("x")
+        GroqPlanner(client=client).generate_plan("x")
     assert [i.code.value for i in exc.value.issues] == ["UNKNOWN_DEPENDENCY"]
+    assert len(client.requests) == 2
+
+
+def test_groq_repair_request_replays_answer_and_issues():
+    bad = llm_style_plan()
+    bad["tasks"][2]["depends_on"] = ["t42"]
+    client = FakeGroqClient([json.dumps(bad), json.dumps(llm_style_plan())])
+    planner = GroqPlanner(client=client)
+    assert len(planner.generate_plan("Compare Apple and NVIDIA").tasks) == 6
+    assert planner.last_attempts == 2
+    first, repair = client.requests
+    assert len(first["messages"]) == 2
+    system, user, assistant, feedback = repair["messages"]
+    assert user == {"role": "user", "content": "Compare Apple and NVIDIA"}
+    assert assistant == {"role": "assistant", "content": json.dumps(bad)}
+    assert feedback["role"] == "user"
+    assert "UNKNOWN_DEPENDENCY [t3]" in feedback["content"] and "t42" in feedback["content"]
 
 
 def _objects(schema):

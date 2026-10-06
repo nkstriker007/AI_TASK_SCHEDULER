@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity clean redis-deps redis-spike
+.PHONY: build test cpp-test py-test parity clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -17,6 +17,12 @@ py-test:
 
 parity: build
 	uv run --project planner python tests/parity.py
+
+redis-up:
+	docker compose up -d --wait redis
+
+redis-down:
+	docker compose down
 
 redis-deps:
 	./scripts/install_redis_deps.sh

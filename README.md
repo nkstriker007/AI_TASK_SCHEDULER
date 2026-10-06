@@ -14,7 +14,9 @@ xcode-select --install          # Apple clang, if not already installed
 brew install cmake
 brew install uv                 # Python toolchain for the planner
 make test                       # C++ unit tests + Python unit tests + schema freshness
-make parity                     # C++ and Python validators vs examples/expected_validation.json
+make parity                     # C++ and Python validators vs examples/messages/               JSON examples of every task message and event (contract #2)
+examples/requests/eval_cases.yaml  planner evaluation cases
+examples/expected_validation.json
 ./scheduler/build/ats_validate examples/plans/invalid_cycle.json
 ```
 
@@ -43,7 +45,24 @@ The planner does not load `.env` itself, so pass it with `--env-file`:
 cd planner && uv run --env-file ../.env python -m planner.cli "Research Apple and NVIDIA and compare them" -o plan.json
 ```
 
-CLI exit codes: 0 plan written, 1 plan rejected by the validator, 2 provider error.
+If the first plan fails validation, the planner sends the issues back once and asks for a corrected plan
+(the CLI says so on stderr); a second failure is a rejection.
+CLI exit codes: 0 plan written, 1 plan rejected by the validator (after one repair attempt), 2 provider error.
+
+Planner evaluation (5 structural cases in `examples/requests/eval_cases.yaml`, one Groq call each plus any repair):
+
+```bash
+cd planner && uv run --env-file ../.env python -m planner.eval
+uv run python -m planner.eval --fake company_research   # offline plumbing check
+```
+
+Redis 7 in Docker (needs Docker Desktop):
+
+```bash
+make redis-up                   # docker compose up -d --wait redis
+docker compose exec redis redis-cli ping
+make redis-down
+```
 
 Redis spike (Day 1 evening):
 
@@ -57,12 +76,15 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
+docs/messages.md                 contract #2 (draft): task messages and events on Redis Streams
 docs/DECISIONS.md                decisions made during the build (D15, D17–D19)
 schemas/                         JSON Schema generated from planner/planner/schema.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/expected_validation.json  expected valid/errors/warnings per fixture (read by the C++ tests, the Python tests and tests/parity.py)
 planner/                         Python planner (Person A)
   planner/schema.py              Pydantic models: ExecutionPlan, PlanFile, Subplan (source of truth)
+  planner/messages.py            Pydantic models: TaskMessage and task events (contract #2)
+  planner/eval.py                planner evaluation: width, depth, sinks, independence
   planner/validate.py            schema + semantic validation, all issue codes and warnings
   planner/llm.py                 Planner base class, GroqPlanner (strict structured output)
   planner/fake.py                FakePlanner: fixture plans, scripted outputs for tests
@@ -90,6 +112,14 @@ tests/test_parity.py             Python validator vs C++ (ats_sim), schema fresh
 - [x] `GroqPlanner` (`llm.py`): one strict structured-output call against a relaxed strict-mode schema, nulls normalized, then the full validator (D18)
 - [x] Planner CLI with a runtime-assigned `request_id`, plus `planner.check` for parity
 - [x] `expand_canned` fixture and `expected_validation.json`; `docs/contract.md` and `docs/DECISIONS.md`
+
+## Day 2 status: Person A
+
+- [x] Repair loop: one retry with the validator's issues (the Groq call replays its previous answer), then reject
+- [x] Message models (contract #2): `TaskMessage`, `task_started` / `task_completed` (incl. `result_kind: "subplan"`) / `task_failed`, exported to `schemas/`, examples in `examples/messages/`, draft in `docs/messages.md` for Person B's review
+- [x] `docker-compose.yml` with Redis 7 (append-only persistence, health check); `make redis-up` / `make redis-down`
+- [x] `eval_cases.yaml` + `planner.eval`; first Groq run: 5/5 cases pass, no repairs needed
+- [ ] Message contract sign-off with Person B; `make demo` once `ats_sim` exists
 
 ## Day 1 status: Person B
 

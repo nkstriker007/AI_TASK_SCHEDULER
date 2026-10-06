@@ -2,8 +2,8 @@
 
 One structured-output call to Groq. Structured output guarantees shape only,
 so every response goes through validate_plan; nothing is trusted or repaired
-silently. The bounded repair loop (one retry with the issue list) is Day 2 and
-plugs into Planner.generate_plan via the `feedback` argument of propose().
+silently. Planner.generate_plan runs the bounded repair loop: one retry with
+the issue list passed to propose() as `feedback`, then reject.
 """
 
 from __future__ import annotations
@@ -31,16 +31,37 @@ class PlanRejected(Exception):
 
 
 class Planner(ABC):
+    last_attempts: int = 0  # propose() calls made by the last generate_plan
+
     @abstractmethod
     def propose(self, request: str, feedback: list[ValidationIssue] | None = None) -> Any:
         """Return the provider's raw (unvalidated) plan JSON."""
 
     def generate_plan(self, request: str) -> ExecutionPlan:
-        raw = self.propose(request)
-        result = validate_plan(raw)
-        if not result.ok:
-            raise PlanRejected(result.issues, raw)
-        return result.value
+        """Propose, validate, and repair at most once (design doc section 6, D8).
+
+        If the first proposal fails validation (or is not parseable), its issues
+        are sent back through propose(feedback=...) once; if that also fails, the
+        second attempt's issues are raised. `last_attempts` records 1 or 2 so the
+        eval can report how often repair was needed.
+        """
+        feedback: list[ValidationIssue] | None = None
+        for attempt in (1, 2):
+            self.last_attempts = attempt
+            try:
+                raw = self.propose(request, feedback=feedback)
+            except PlanRejected as exc:  # unparseable output counts as a failed attempt
+                if attempt == 2:
+                    raise
+                feedback = exc.issues
+                continue
+            result = validate_plan(raw)
+            if result.ok:
+                return result.value
+            if attempt == 2:
+                raise PlanRejected(result.issues, raw)
+            feedback = result.errors
+        raise AssertionError("unreachable")
 
 
 # --- LLM-facing schema -------------------------------------------------------
@@ -126,6 +147,7 @@ class GroqPlanner(Planner):
         self.client = client
         self.system_prompt = load_system_prompt()
         self.last_usage: Any = None
+        self._last_content: str | None = None  # previous answer, replayed on a repair call
 
     def propose(self, request: str, feedback: list[ValidationIssue] | None = None) -> Any:
         messages = [
@@ -133,6 +155,8 @@ class GroqPlanner(Planner):
             {"role": "user", "content": request},
         ]
         if feedback:
+            if self._last_content:
+                messages.append({"role": "assistant", "content": self._last_content})
             messages.append({"role": "user", "content": _feedback_message(feedback)})
 
         response = self.client.chat.completions.create(
@@ -146,6 +170,7 @@ class GroqPlanner(Planner):
         self.last_usage = getattr(response, "usage", None)
         choice = response.choices[0]
         content = choice.message.content or ""
+        self._last_content = content
         try:
             raw = json.loads(content)
         except json.JSONDecodeError as exc:
