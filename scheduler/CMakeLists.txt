@@ -23,7 +23,11 @@ add_library(ats_core
   src/Types.cpp
   src/PlanLoader.cpp
   src/Dag.cpp
-  src/ExecutionState.cpp)
+  src/ExecutionState.cpp
+  src/Analysis.cpp
+  src/Policy.cpp
+  src/Scheduler.cpp
+  src/Simulator.cpp)
 target_include_directories(ats_core PUBLIC include)
 target_link_libraries(ats_core PUBLIC nlohmann_json::nlohmann_json)
 if(MSVC)
@@ -35,6 +39,8 @@ endif()
 # ---- tools ----
 add_executable(ats_validate tools/ats_validate.cpp)
 target_link_libraries(ats_validate PRIVATE ats_core)
+add_executable(ats_sim tools/ats_sim.cpp)
+target_link_libraries(ats_sim PRIVATE ats_core)
 
 if(ATS_WITH_REDIS)
   # macOS: brew install hiredis redis-plus-plus   Linux: scripts/install_redis_deps.sh
@@ -56,25 +62,30 @@ if(ATS_BUILD_TESTS)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
-  FetchContent_MakeAvailable(googletest)
-  if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    foreach(t gtest gmock gtest_main gmock_main)
-      if(TARGET ${t})
-        target_compile_options(${t} PRIVATE -Wno-error=character-conversion)
-      endif()
-    endforeach()
-  endif()
   enable_testing()
   add_executable(ats_tests
     tests/test_smoke.cpp
     tests/test_loader.cpp
     tests/test_dag.cpp
     tests/test_state.cpp
-    tests/test_fixtures.cpp)
+    tests/test_fixtures.cpp
+    tests/test_analysis.cpp
+    tests/test_policy.cpp
+    tests/test_scheduler.cpp
+    tests/test_simulator.cpp)
   target_link_libraries(ats_tests PRIVATE ats_core GTest::gtest_main GTest::gmock)
   target_compile_definitions(ats_tests PRIVATE
     ATS_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../examples/plans"
     ATS_EXPECTED_VALIDATION="${CMAKE_CURRENT_SOURCE_DIR}/../examples/expected_validation.json")
   include(GoogleTest)
   gtest_discover_tests(ats_tests)
+
+  # End-to-end checks of the CLI: exit codes are part of its contract.
+  set(PLANS ${CMAKE_CURRENT_SOURCE_DIR}/../examples/plans)
+  add_test(NAME cli_sim_valid COMMAND ats_sim ${PLANS}/company_research.json --workers 2)
+  set_tests_properties(cli_sim_valid PROPERTIES PASS_REGULAR_EXPRESSION "makespan 65.00s")
+  add_test(NAME cli_sim_invalid_plan COMMAND ats_sim ${PLANS}/invalid_cycle.json)
+  set_tests_properties(cli_sim_invalid_plan PROPERTIES WILL_FAIL TRUE)
+  add_test(NAME cli_sim_injected_failure COMMAND ats_sim ${PLANS}/company_research.json --fail t2)
+  set_tests_properties(cli_sim_injected_failure PROPERTIES WILL_FAIL TRUE)
 endif()
