@@ -13,7 +13,6 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .messages import TaskEvent, TaskMessage
 from .paths import SCHEMAS_DIR
 from .schema import ExecutionPlan, PlanFile, Subplan
 
@@ -21,8 +20,6 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "execution_plan.schema.json": ExecutionPlan,
     "plan_file.schema.json": PlanFile,
     "subplan.schema.json": Subplan,
-    "task_message.schema.json": TaskMessage,
-    "task_event.schema.json": TaskEvent,
 }
 
 
