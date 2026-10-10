@@ -1,0 +1,13 @@
+{
+  "request_id": "req_2f9c1a7e",
+  "task_id": "t2.1",
+  "attempt": 1,
+  "attempt_id": "req_2f9c1a7e:t2.1:1",
+  "type": "research",
+  "instruction": "Research company 1.",
+  "inputs": {
+    "t2": "result:req_2f9c1a7e:t2"
+  },
+  "deadline_ms": 1759112400000,
+  "estimated_seconds": null
+}

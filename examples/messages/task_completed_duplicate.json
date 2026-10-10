@@ -1,0 +1,12 @@
+{
+  "event": "task_completed",
+  "attempt_id": "req_2f9c1a7e:t5:1",
+  "worker_id": "w-2",
+  "ts_ms": 1759112291000,
+  "result_key": "result:req_2f9c1a7e:t5",
+  "committed": false,
+  "result_kind": "output",
+  "exec_ms": 130400,
+  "tokens_in": 3120,
+  "tokens_out": 655
+}

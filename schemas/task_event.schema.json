@@ -1,0 +1,206 @@
+{
+  "$defs": {
+    "TaskCompleted": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "pattern": "^[^:]+:t[0-9]+(\\.[0-9]+)?:[1-9][0-9]*$",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "committed": {
+          "title": "Committed",
+          "type": "boolean"
+        },
+        "event": {
+          "const": "task_completed",
+          "title": "Event",
+          "type": "string"
+        },
+        "exec_ms": {
+          "minimum": 0,
+          "title": "Exec Ms",
+          "type": "integer"
+        },
+        "result_key": {
+          "pattern": "^result:[^:]+:t[0-9]+(\\.[0-9]+)?$",
+          "title": "Result Key",
+          "type": "string"
+        },
+        "result_kind": {
+          "default": "output",
+          "enum": [
+            "output",
+            "subplan"
+          ],
+          "title": "Result Kind",
+          "type": "string"
+        },
+        "tokens_in": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokens In"
+        },
+        "tokens_out": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokens Out"
+        },
+        "ts_ms": {
+          "minimum": 0,
+          "title": "Ts Ms",
+          "type": "integer"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "worker_id",
+        "ts_ms",
+        "event",
+        "result_key",
+        "committed",
+        "exec_ms"
+      ],
+      "title": "TaskCompleted",
+      "type": "object"
+    },
+    "TaskFailed": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "pattern": "^[^:]+:t[0-9]+(\\.[0-9]+)?:[1-9][0-9]*$",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "error_class": {
+          "enum": [
+            "retryable",
+            "permanent"
+          ],
+          "title": "Error Class",
+          "type": "string"
+        },
+        "event": {
+          "const": "task_failed",
+          "title": "Event",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retry After Ms"
+        },
+        "ts_ms": {
+          "minimum": 0,
+          "title": "Ts Ms",
+          "type": "integer"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "worker_id",
+        "ts_ms",
+        "event",
+        "error_class",
+        "message"
+      ],
+      "title": "TaskFailed",
+      "type": "object"
+    },
+    "TaskStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "pattern": "^[^:]+:t[0-9]+(\\.[0-9]+)?:[1-9][0-9]*$",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "event": {
+          "const": "task_started",
+          "title": "Event",
+          "type": "string"
+        },
+        "ts_ms": {
+          "minimum": 0,
+          "title": "Ts Ms",
+          "type": "integer"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "worker_id",
+        "ts_ms",
+        "event"
+      ],
+      "title": "TaskStarted",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Any entry on task:events; the `event` field selects the type.",
+  "discriminator": {
+    "mapping": {
+      "task_completed": "#/$defs/TaskCompleted",
+      "task_failed": "#/$defs/TaskFailed",
+      "task_started": "#/$defs/TaskStarted"
+    },
+    "propertyName": "event"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/TaskStarted"
+    },
+    {
+      "$ref": "#/$defs/TaskCompleted"
+    },
+    {
+      "$ref": "#/$defs/TaskFailed"
+    }
+  ],
+  "title": "TaskEvent"
+}

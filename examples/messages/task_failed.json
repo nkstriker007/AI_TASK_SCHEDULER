@@ -1,0 +1,9 @@
+{
+  "event": "task_failed",
+  "attempt_id": "req_2f9c1a7e:t5:1",
+  "worker_id": "w-3",
+  "ts_ms": 1759112275000,
+  "error_class": "retryable",
+  "message": "429 rate limited",
+  "retry_after_ms": 4000
+}

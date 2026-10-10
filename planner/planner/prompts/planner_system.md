@@ -9,9 +9,10 @@ Rules:
 6. Every task needs a specific, self-contained instruction (at most 2000 characters) and a short title (at most 120 characters). Use IDs t1, t2, t3, ... in order and no other IDs.
 7. Do not describe tools, workers, shell commands, or execution details.
 8. Keep the plan proportionate: a simple request needs one or two tasks, not an elaborate pipeline. Never exceed 50 tasks.
+9. Add a research task only when the request asks for research or a later task needs facts gathered first. To summarize or explain a named topic, use one summarize task for it, not research followed by summarize.
 
 Fields:
 - summary: one sentence (at most 300 characters) describing the whole request.
-- hints.estimated_seconds: your rough estimate of how long the task takes, or null.
+- hints.estimated_seconds: rough time for the task, which is one model call: about 10-20 for summarize, analyze and compare, about 20-40 for research and report. Use null if unsure.
 - hints.expected_fanout: for expand tasks only, how many tasks you expect it to create; null otherwise.
 - schema_version: always 1.

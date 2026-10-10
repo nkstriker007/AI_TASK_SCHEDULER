@@ -1,0 +1,14 @@
+{
+  "request_id": "req_2f9c1a7e",
+  "task_id": "t5",
+  "attempt": 2,
+  "attempt_id": "req_2f9c1a7e:t5:2",
+  "type": "compare",
+  "instruction": "Compare financial performance and recent developments.",
+  "inputs": {
+    "t3": "result:req_2f9c1a7e:t3",
+    "t4": "result:req_2f9c1a7e:t4"
+  },
+  "deadline_ms": 1759112400000,
+  "estimated_seconds": 15
+}

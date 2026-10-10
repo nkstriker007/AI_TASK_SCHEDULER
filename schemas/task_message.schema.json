@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "TaskType": {
+      "enum": [
+        "research",
+        "summarize",
+        "analyze",
+        "compare",
+        "report",
+        "expand"
+      ],
+      "title": "TaskType",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One dispatched attempt. Each retry is a new message with attempt + 1 (D10).",
+  "properties": {
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "attempt_id": {
+      "pattern": "^[^:]+:t[0-9]+(\\.[0-9]+)?:[1-9][0-9]*$",
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "deadline_ms": {
+      "minimum": 0,
+      "title": "Deadline Ms",
+      "type": "integer"
+    },
+    "estimated_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Estimated Seconds"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Inputs",
+      "type": "object"
+    },
+    "instruction": {
+      "minLength": 1,
+      "title": "Instruction",
+      "type": "string"
+    },
+    "request_id": {
+      "minLength": 1,
+      "pattern": "^[^:]+$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^t[0-9]+(\\.[0-9]+)?$",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/TaskType"
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "attempt",
+    "attempt_id",
+    "type",
+    "instruction",
+    "deadline_ms"
+  ],
+  "title": "TaskMessage",
+  "type": "object"
+}

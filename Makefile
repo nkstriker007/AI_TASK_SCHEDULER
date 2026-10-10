@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test parity demo clean redis-deps redis-spike
+.PHONY: build test cpp-test py-test parity clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -10,17 +10,13 @@ test: build
 	cd $(BUILD) && ctest --output-on-failure
 
 parity: build
-	python3 tests/parity.py
+	uv run --project planner python tests/parity.py
 
-demo: build
-	@echo "== company_research, FIFO, 2 workers =="
-	./$(BUILD)/ats_sim examples/plans/company_research.json --workers 2
-	@echo
-	@echo "== same plan, unlimited workers (makespan = critical path) =="
-	./$(BUILD)/ats_sim examples/plans/company_research.json --workers 0 | tail -3
-	@echo
-	@echo "== failure injected on t1: descendants cancelled, independent branch finishes =="
-	-./$(BUILD)/ats_sim examples/plans/company_research.json --fail t1 | tail -3
+redis-up:
+	docker compose up -d --wait redis
+
+redis-down:
+	docker compose down
 
 redis-deps:
 	./scripts/install_redis_deps.sh
