@@ -1,0 +1,90 @@
+{
+  "request_id": "req_fx_expand_canned",
+  "created_at": "2026-09-28T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "Research the top 3 AI chip companies and compare them",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "Research the AI chip market",
+        "instruction": "Research the AI chip market.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 20
+        }
+      },
+      {
+        "id": "t2",
+        "type": "expand",
+        "title": "Identify top AI chip companies",
+        "instruction": "Identify the top 3 AI chip companies by 2025 revenue and create one research task per company.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 5,
+          "expected_fanout": 3,
+          "sim_subplan": {
+            "tasks": [
+              {
+                "id": "s1",
+                "type": "research",
+                "title": "Research company 1",
+                "instruction": "Research company 1.",
+                "depends_on": [],
+                "hints": {
+                  "estimated_seconds": 20
+                }
+              },
+              {
+                "id": "s2",
+                "type": "research",
+                "title": "Research company 2",
+                "instruction": "Research company 2.",
+                "depends_on": [],
+                "hints": {
+                  "estimated_seconds": 25
+                }
+              },
+              {
+                "id": "s3",
+                "type": "research",
+                "title": "Research company 3",
+                "instruction": "Research company 3.",
+                "depends_on": [],
+                "hints": {
+                  "estimated_seconds": 15
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "t3",
+        "type": "compare",
+        "title": "Compare the companies",
+        "instruction": "Compare the companies.",
+        "depends_on": [
+          "t1",
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 15
+        }
+      },
+      {
+        "id": "t4",
+        "type": "report",
+        "title": "Write final report",
+        "instruction": "Write final report.",
+        "depends_on": [
+          "t3"
+        ],
+        "hints": {
+          "estimated_seconds": 15
+        }
+      }
+    ]
+  }
+}

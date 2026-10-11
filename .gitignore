@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+scheduler/build*/
+deps/
+.pytest_cache/
+scheduler/build/
+runs/
+.DS_Store
+compile_commands.json

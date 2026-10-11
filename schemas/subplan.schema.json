@@ -1,0 +1,107 @@
+{
+  "$defs": {
+    "SubplanHints": {
+      "additionalProperties": false,
+      "properties": {
+        "estimated_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Seconds"
+        }
+      },
+      "title": "SubplanHints",
+      "type": "object"
+    },
+    "SubplanTask": {
+      "additionalProperties": false,
+      "description": "A task proposed by an expand executor. IDs are local (s1, s2, ...);\nthe scheduler renames them to <expand_id>.1, <expand_id>.2, ... on splice.",
+      "properties": {
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "hints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubplanHints"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "pattern": "^s[0-9]+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "instruction": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Instruction",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/SubplanTaskType"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "title",
+        "instruction"
+      ],
+      "title": "SubplanTask",
+      "type": "object"
+    },
+    "SubplanTaskType": {
+      "description": "Task types allowed inside a subplan: no nested expand (max depth 1).",
+      "enum": [
+        "research",
+        "summarize",
+        "analyze",
+        "compare",
+        "report"
+      ],
+      "title": "SubplanTaskType",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Result of an expand task. Dependencies may only name other subplan tasks;\nevery subplan task implicitly depends on the expand task itself.",
+  "properties": {
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/SubplanTask"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Tasks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "tasks"
+  ],
+  "title": "Subplan",
+  "type": "object"
+}

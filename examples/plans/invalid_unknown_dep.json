@@ -1,0 +1,26 @@
+{
+  "request_id": "req_fixture_invalid_unknown_dep",
+  "created_at": "2026-09-28T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "B depends on a task that does not exist",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "Task t1",
+        "instruction": "Do the work for t1.",
+        "depends_on": []
+      },
+      {
+        "id": "t2",
+        "type": "summarize",
+        "title": "Task t2",
+        "instruction": "Do the work for t2.",
+        "depends_on": [
+          "t9"
+        ]
+      }
+    ]
+  }
+}

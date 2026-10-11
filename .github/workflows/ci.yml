@@ -1,0 +1,29 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  scheduler:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Configure
+        run: cmake -S scheduler -B scheduler/build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-Werror
+      - name: Build
+        run: cmake --build scheduler/build -j
+      - name: Unit tests
+        run: cd scheduler/build && ctest --output-on-failure
+      - name: Parity (C++ and Python vs expected_validation.json)
+        run: uv run --project planner python tests/parity.py
+
+  planner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Unit tests
+        run: cd planner && uv run pytest
+      - name: Schema freshness and parity tests
+        run: uv run --project planner pytest tests/test_parity.py

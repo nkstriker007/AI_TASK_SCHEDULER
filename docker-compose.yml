@@ -1,0 +1,22 @@
+# Day 2: Redis 7 only. atsd, the API and workers are added from Day 3 (design doc 12.4).
+#
+#   docker compose up -d redis      # start
+#   docker compose exec redis redis-cli ping
+#   docker compose down             # stop (add -v to drop the data volume)
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]  # streams and results survive a restart
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  redis-data:

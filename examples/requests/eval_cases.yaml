@@ -1,0 +1,57 @@
+# Planner evaluation cases (design doc section 6). Run: python -m planner.eval
+#
+# Assertions are structural because titles and wording vary between runs:
+#   min_tasks / max_tasks     number of tasks
+#   min_width / max_width     most tasks on one DAG level (level = longest path from a root)
+#   min_depth / max_depth     number of levels
+#   single_sink: true         exactly one task has no dependents (the final answer)
+#   sink_type: <type>         ... and it has this type
+#   independent: {type, min}  at least `min` tasks of `type` with no dependency path between any two
+#   forbid_types: [...]       task types that must not appear
+
+cases:
+  two_companies:
+    request: >-
+      Research Apple and NVIDIA, summarize the key recent developments for each,
+      compare the two companies, and write a short report.
+    expect:
+      independent: {type: research, min: 2}
+      min_width: 2
+      single_sink: true
+
+  four_companies:
+    request: >-
+      Research Apple, NVIDIA, AMD and Microsoft, compare them, and write a report
+      on how they stack up against each other.
+    expect:
+      independent: {type: research, min: 4}
+      min_width: 4
+      max_depth: 4
+      single_sink: true
+      forbid_types: [expand]  # the companies are named, nothing to discover
+
+  mostly_sequential:
+    request: >-
+      Find the best-selling electric vehicle of 2025, then research the company
+      that makes it, then write a profile of that company.
+    expect:
+      max_width: 2
+      min_depth: 3
+      single_sink: true
+
+  document_batch:
+    request: >-
+      Summarize each of these five topics: quantum computing, CRISPR gene editing,
+      nuclear fusion, solid-state batteries, and large language models. Then write
+      one combined digest of all five.
+    expect:
+      independent: {type: summarize, min: 5}
+      single_sink: true
+      sink_type: report
+      forbid_types: [expand]
+
+  trivial:
+    request: Write a short explanation of what a DAG is.
+    expect:
+      max_tasks: 2
+      single_sink: true
