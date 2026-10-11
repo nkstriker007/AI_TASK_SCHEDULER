@@ -59,6 +59,22 @@ Every event has `event`, `attempt_id`, `worker_id` (non-empty) and `ts_ms` (work
 
 `committed: false` means `SET NX` found an earlier attempt's result, so this attempt's output was discarded. atsd treats the first `task_completed` for a task as the completion and records later ones (8.5).
 
+## How the scheduler applies messages and events
+
+Person B's Day 2 `Scheduler` (`scheduler/include/ats/Scheduler.hpp`) already exposes one call per message or event, so atsd (Day 3) only has to translate between Redis entries and these calls. It never reads a clock or does I/O itself; deadlines and retry limits live in the service layer (design doc 8.5–8.7).
+
+| Message or event | Scheduler call | State change |
+|---|---|---|
+| atsd writes a `TaskMessage` | `dispatchNext()` returns `{node, attempt}` | READY or RETRYING → QUEUED; `attempt` and `attempt_id` come from the returned attempt number |
+| `task_started` | `started(n)` | QUEUED → RUNNING |
+| first `task_completed` for the task | `complete(n)` | QUEUED or RUNNING → COMPLETED; children whose last dependency this was become READY. QUEUED is accepted because a `task_started` can be lost or arrive late |
+| a later `task_completed` for the same task | none | recorded only (8.5), so children are never released twice |
+| `task_failed` with `error_class: "retryable"` and attempts left | `retry(n)` | → RETRYING; the task re-enters the ready set and its next dispatch is a new message with `attempt + 1` |
+| `task_failed` with `"permanent"`, or retryable with no attempts left | `fail(n)` | → FAILED; every unfinished descendant → CANCELLED, and the request fails |
+| attempt deadline passes (Day 5) | same as a retryable `task_failed` | see 8.7 |
+
+The simulator (`ats_sim --flaky` / `--fail`) drives the same calls today, so the retry and failure paths are already tested before Redis is involved.
+
 ## Additions beyond the design doc's section 8.4 (agreed)
 
 1. `TaskMessage.estimated_seconds`: the sim executor sleeps for the task's hint (8.9), and the message is the only thing it reads.

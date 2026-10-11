@@ -61,6 +61,32 @@ TEST(PlanLoader, MissingEnvelopeFields) {
   EXPECT_THAT(codesOf(load(f).issues), ElementsAre("SCHEMA", "SCHEMA"));
 }
 
+// Contract #1: request_id and created_at are non-empty strings, with no upper length limit.
+TEST(PlanLoader, EmptyEnvelopeStringsRejected) {
+  json f = planFile({task("t1")});
+  f["created_at"] = "";
+  EXPECT_THAT(codesOf(load(f).issues), ElementsAre("SCHEMA"));
+  f = planFile({task("t1")});
+  f["request_id"] = "";
+  EXPECT_THAT(codesOf(load(f).issues), ElementsAre("SCHEMA"));
+}
+
+TEST(PlanLoader, EnvelopeStringsMustBeStrings) {
+  json f = planFile({task("t1")});
+  f["request_id"] = 7;
+  f["created_at"] = nullptr;
+  EXPECT_THAT(codesOf(load(f).issues), ElementsAre("SCHEMA", "SCHEMA"));
+}
+
+TEST(PlanLoader, LongEnvelopeStringsAccepted) {
+  json f = planFile({task("t1")});
+  f["request_id"] = std::string(5000, 'r');
+  f["created_at"] = std::string(5000, 'c');
+  LoadResult r = load(f);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.plan->requestId.size(), 5000u);
+}
+
 TEST(PlanLoader, UnknownFieldsRejectedEverywhere) {
   json t = task("t1");
   t["priority"] = 5;                         // runtime concern, not allowed from the planner

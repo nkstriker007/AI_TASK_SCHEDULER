@@ -33,6 +33,8 @@ class Checker {
     }
   }
 
+  static constexpr std::size_t kNoMaxChars = std::numeric_limits<std::size_t>::max();
+
   // Required string with a character-length range. Returns the value when valid.
   std::optional<std::string> requiredString(const json& obj, const char* key, const std::string& path,
                                             std::size_t minChars, std::size_t maxChars,
@@ -51,7 +53,10 @@ class Checker {
     const std::size_t n = utf8Length(v);
     if (n < minChars || n > maxChars) {
       std::ostringstream m;
-      m << "must be " << minChars << "-" << maxChars << " characters (got " << n << ")";
+      if (maxChars == kNoMaxChars)
+        m << "must be at least " << minChars << " character" << (minChars == 1 ? "" : "s") << " (got " << n << ")";
+      else
+        m << "must be " << minChars << "-" << maxChars << " characters (got " << n << ")";
       schema(p, m.str(), taskId);
       return std::nullopt;
     }
@@ -219,14 +224,9 @@ LoadResult parsePlanFile(std::string_view text) {
 
   Plan plan;
   c.onlyKeys(doc, "$", {"request_id", "created_at", "plan"});
-  if (auto v = c.requiredString(doc, "request_id", "$", 1, 200)) plan.requestId = *v;
-  if (auto it = doc.find("created_at"); it == doc.end()) {
-    c.schema("$.created_at", "field required");
-  } else if (!it->is_string()) {
-    c.schema("$.created_at", "must be a string");
-  } else {
-    plan.createdAt = it->get<std::string>();
-  }
+  // Contract #1: both are non-empty strings assigned by the runtime, with no upper length limit.
+  if (auto v = c.requiredString(doc, "request_id", "$", 1, Checker::kNoMaxChars)) plan.requestId = *v;
+  if (auto v = c.requiredString(doc, "created_at", "$", 1, Checker::kNoMaxChars)) plan.createdAt = *v;
 
   auto pit = doc.find("plan");
   if (pit == doc.end()) {
