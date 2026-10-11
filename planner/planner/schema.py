@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_TASKS = 50
 MAX_SUBPLAN_TASKS = 20
@@ -90,6 +90,14 @@ class ExecutionPlan(BaseModel):
     schema_version: Literal[1] = 1
     summary: str = Field(min_length=1, max_length=300)
     tasks: list[PlannedTask] = Field(min_length=1, max_length=MAX_TASKS)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _integer_version(cls, v: object) -> object:
+        # Literal[1] alone accepts true and 1.0 (both == 1); the contract wants the integer 1.
+        if type(v) is not int:
+            raise ValueError(f"schema_version must be the integer 1 (got {v!r})")
+        return v
 
 
 class PlanFile(BaseModel):

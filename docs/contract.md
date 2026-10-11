@@ -38,7 +38,7 @@ Changing anything here takes a PR that updates `planner/planner/schema.py`, the 
 }
 ```
 
-`request_id` and `created_at` are non-empty strings assigned by the runtime. Unknown fields are errors at every level (Pydantic `extra="forbid"`). Lengths are counted in Unicode characters, not bytes.
+`request_id` and `created_at` are non-empty strings assigned by the runtime. Unknown fields are errors at every level (Pydantic `extra="forbid"`). Lengths are counted in Unicode characters, not bytes. Types are strict and nothing is converted: a string or boolean is not a number, `2.0` is not an integer, and `schema_version` must be the integer `1` (`true`, `1.0` or `"1"` is `SCHEMA_VERSION`).
 
 ## Additions beyond the design doc's section 4
 

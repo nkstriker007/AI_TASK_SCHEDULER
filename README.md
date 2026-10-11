@@ -76,7 +76,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
-docs/messages.md                 contract #2 (draft): task messages and events on Redis Streams
+docs/messages.md                 contract #2 (frozen): task messages and events on Redis Streams
 docs/DECISIONS.md                decisions made during the build (D15, D17–D19)
 schemas/                         JSON Schema generated from planner/planner/schema.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
@@ -116,10 +116,12 @@ tests/test_parity.py             Python validator vs C++ (ats_sim), schema fresh
 ## Day 2 status: Person A
 
 - [x] Repair loop: one retry with the validator's issues (the Groq call replays its previous answer), then reject
-- [x] Message models (contract #2): `TaskMessage`, `task_started` / `task_completed` (incl. `result_kind: "subplan"`) / `task_failed`, exported to `schemas/`, examples in `examples/messages/`, draft in `docs/messages.md` for Person B's review
+- [x] Message models (contract #2): `TaskMessage`, `task_started` / `task_completed` (incl. `result_kind: "subplan"`) / `task_failed`, exported to `schemas/`, examples in `examples/messages/`, `docs/messages.md`
 - [x] `docker-compose.yml` with Redis 7 (append-only persistence, health check); `make redis-up` / `make redis-down`
 - [x] `eval_cases.yaml` + `planner.eval`; first Groq run: 5/5 cases pass, no repairs needed
-- [ ] Message contract sign-off with Person B; `make demo` once `ats_sim` exists
+- [x] Message contract (#2) signed off by Person A and Person B and frozen
+- [x] Python validator made strict (no type conversion), matching the C++ loader
+- [ ] `make demo` once `ats_sim` exists
 
 ## Day 1 status: Person B
 

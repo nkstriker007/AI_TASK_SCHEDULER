@@ -165,3 +165,30 @@ def test_empty_sim_subplan_is_a_schema_error_only():
     doc = load("expand_canned")
     doc["plan"]["tasks"][1]["hints"]["sim_subplan"]["tasks"] = []
     assert codes(validate_plan_file(doc).errors) == ["SCHEMA"]
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("estimated_seconds", "5", "SCHEMA"),     # strings are not numbers
+    ("estimated_seconds", True, "SCHEMA"),    # nor are booleans
+    ("expected_fanout", 2.0, "SCHEMA"),       # 2.0 is not an integer
+    ("expected_fanout", "2", "SCHEMA"),
+])
+def test_hints_are_never_coerced(field, value, code):
+    plan = base_plan()
+    plan["tasks"][0]["hints"][field] = value
+    assert codes(validate_plan(plan).errors) == [code]
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1"])
+def test_schema_version_must_be_the_integer_1(value):
+    plan = base_plan()
+    plan["schema_version"] = value
+    assert codes(validate_plan(plan).errors) == ["SCHEMA_VERSION"]
+
+
+def test_strict_validation_still_accepts_valid_json_forms():
+    plan = base_plan()
+    plan["tasks"][0]["hints"]["estimated_seconds"] = 12  # an integer is a valid number
+    del plan["schema_version"]                             # optional, defaults to 1
+    result = validate_plan(plan)
+    assert result.ok and result.value.tasks[0].hints.estimated_seconds == 12.0

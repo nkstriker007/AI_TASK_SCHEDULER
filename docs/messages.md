@@ -1,6 +1,6 @@
-# Contract #2: task messages and events (draft, freeze at the end of Day 2)
+# Contract #2: task messages and events (frozen end of Day 2)
 
-Changing anything here after the freeze takes a PR that updates `planner/planner/messages.py`, the generated `schemas/`, `examples/messages/`, and both sides, reviewed by the other person.
+Agreed by Person A and Person B. Changing anything here takes a PR that updates `planner/planner/messages.py`, the generated `schemas/`, `examples/messages/`, and both sides, reviewed by the other person.
 
 ## Sources of truth
 
@@ -59,7 +59,7 @@ Every event has `event`, `attempt_id`, `worker_id` (non-empty) and `ts_ms` (work
 
 `committed: false` means `SET NX` found an earlier attempt's result, so this attempt's output was discarded. atsd treats the first `task_completed` for a task as the completion and records later ones (8.5).
 
-## Additions beyond the design doc's section 8.4 (for review)
+## Additions beyond the design doc's section 8.4 (agreed)
 
 1. `TaskMessage.estimated_seconds`: the sim executor sleeps for the task's hint (8.9), and the message is the only thing it reads.
 2. Stream encoding: one `data` field holding JSON, rather than one stream field per message field.

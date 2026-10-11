@@ -6,10 +6,15 @@ Issue codes are shared with the C++ PlanLoader/Dag (docs/contract.md).
 
 Semantic checks run on the raw JSON, so a plan with a schema error still gets
 its dependency and cycle problems reported in the same pass.
+
+Schema validation is strict JSON validation: wrong types are errors, never
+coerced ("5" or true is not a number, 2.0 is not an integer), matching the
+C++ loader. Plans always arrive as JSON, so they are checked as JSON.
 """
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
@@ -87,7 +92,7 @@ def validate_subplan(data: Any, max_tasks: int = MAX_SUBPLAN_TASKS) -> Validatio
 def _finish(model: type[M], data: Any, issues: list[ValidationIssue]) -> ValidationResult[M]:
     if any(i.severity == "error" for i in issues):
         return ValidationResult(None, issues)
-    return ValidationResult(model.model_validate(data), issues)
+    return ValidationResult(_strict(model, data), issues)
 
 
 # --- schema (pydantic) -------------------------------------------------------
@@ -101,7 +106,7 @@ def _schema_issues(
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     try:
-        model.model_validate(data)
+        _strict(model, data)
     except ValidationError as exc:
         for err in exc.errors():
             issues.append(_map_pydantic_error(err, data, plan_path, subplan=model is Subplan))
@@ -113,6 +118,11 @@ def _schema_issues(
         ):
             issues.append(_too_many(len(tasks), max_tasks))
     return issues
+
+
+def _strict(model: type[M], data: Any) -> M:
+    """Validate as JSON in strict mode, so no value is silently converted."""
+    return model.model_validate_json(json.dumps(data), strict=True)
 
 
 def _too_many(n: int, limit: int) -> ValidationIssue:
