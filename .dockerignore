@@ -1,0 +1,12 @@
+.git
+.github
+**/.venv
+**/__pycache__
+**/.pytest_cache
+.env
+deps
+runs
+artifacts
+scheduler/build*
+*.pyc
+.DS_Store

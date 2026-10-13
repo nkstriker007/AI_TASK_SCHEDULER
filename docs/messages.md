@@ -59,6 +59,28 @@ Every event has `event`, `attempt_id`, `worker_id` (non-empty) and `ts_ms` (work
 
 `committed: false` means `SET NX` found an earlier attempt's result, so this attempt's output was discarded. atsd treats the first `task_completed` for a task as the completion and records later ones (8.5).
 
+## Request intake and status (proposed on Day 3, needs Person B's sign-off)
+
+The design doc names these keys (8.3) but doesn't define their contents. The API and the worker side are built against the format below. Key and stream names are in `planner/planner/keys.py`. `worker/worker/minisched.py`, a Python stand-in for atsd used only for testing, writes exactly this format, so it can serve as a reference.
+
+| Key | Type | Writer → reader | Content |
+|---|---|---|---|
+| `requests:new` | stream | API → atsd (group `scheduler`) | One field `data`: the plan file JSON (`{request_id, created_at, plan}`, contract #1), already validated by the API |
+| `plan:<request_id>` | string | API → API | The same plan file JSON, written once (`SET NX`) before the `XADD`, so `GET /requests/{id}` works before atsd has picked the request up. atsd never needs to read it |
+| `request:<request_id>` | hash | atsd → API | Fields below |
+
+`request:<request_id>` fields, all strings:
+
+| Field | Value |
+|---|---|
+| `status` | `RUNNING`, `SUCCEEDED`, `FAILED`, or `REJECTED` (the C++ loader rejected a plan the API accepted; see the known parity difference in `docs/contract.md`) |
+| `sink` | ID of the single task with no dependents (empty if there are several); the API returns its result as the final output |
+| `updated_ms` | Unix epoch ms of the last change |
+| `task:<task_id>` | JSON `{"state": "<TaskState in upper case>", "attempt": <int, 0 before the first dispatch>}`, one field per task, including spliced tasks (`task:t2.1`) |
+| `error` | optional: why the request failed or was rejected |
+
+While the hash doesn't exist, the API reports the request as `SUBMITTED` with every task `WAITING`. Updating one task is a single `HSET request:<id> task:<tid> ...`, so atsd never rewrites the whole hash.
+
 ## How the scheduler applies messages and events
 
 Person B's Day 2 `Scheduler` (`scheduler/include/ats/Scheduler.hpp`) already exposes one call per message or event, so atsd (Day 3) only has to translate between Redis entries and these calls. It never reads a clock or does I/O itself; deadlines and retry limits live in the service layer (design doc 8.5–8.7).

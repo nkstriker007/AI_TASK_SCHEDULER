@@ -1,8 +1,14 @@
-# Day 2: Redis 7 only. atsd, the API and workers are added from Day 3 (design doc 12.4).
+# Day 3: Redis 7, the API and 3 workers. atsd (C++, Person B) is added as its own service.
 #
-#   docker compose up -d redis      # start
-#   docker compose exec redis redis-cli ping
-#   docker compose down             # stop (add -v to drop the data volume)
+#   docker compose up -d --build                     # redis + api (port 8000) + 3 workers
+#   docker compose up -d --scale worker=5            # change the number of workers
+#   docker compose --profile minisched up -d         # also run the Python stand-in for atsd (testing only;
+#                                                    # never together with atsd)
+#   docker compose logs -f worker
+#   docker compose down                              # stop (add -v to drop the Redis data volume)
+#
+# SIM_TIME_SCALE shrinks every sim task's duration (0.1 runs a 65 s plan in 6.5 s), e.g.
+#   SIM_TIME_SCALE=0.1 docker compose up -d
 services:
   redis:
     image: redis:7-alpine
@@ -17,6 +23,52 @@ services:
       timeout: 3s
       retries: 15
     restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ATS_PLANNER: ${ATS_PLANNER:-groq}
+    env_file:
+      - path: .env          # GROQ_API_KEY, ATS_PLANNER_MODEL
+        required: false
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_CAPABILITIES: sim
+      WORKER_CONCURRENCY: "1"
+      SIM_TIME_SCALE: ${SIM_TIME_SCALE:-1}
+    deploy:
+      replicas: 3
+    stop_grace_period: 2m   # let in-flight attempts finish on SIGTERM
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  minisched:
+    profiles: ["minisched"]
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    command: ["python", "-m", "worker.minisched", "--serve"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   redis-data:

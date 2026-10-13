@@ -19,7 +19,9 @@ C++ runtime:
 
 ```bash
 make build                      # configure + build scheduler/ into scheduler/build
-make test                       # C++ unit tests and CLI tests (ctest)
+make test                       # C++ tests (ctest) + planner, worker, API and parity tests (Python)
+make cpp-test                   # C++ only
+make py-test                    # Python only (worker/API tests start a throwaway redis-server)
 make parity                     # C++ and Python validators vs examples/expected_validation.json
 make demo                       # simulate examples/plans/company_research.json: 2 workers, unlimited workers, injected failure
 ./scheduler/build/ats_validate examples/plans/invalid_cycle.json
@@ -85,12 +87,36 @@ cd planner && uv run --env-file ../.env python -m planner.eval
 uv run python -m planner.eval --fake company_research   # offline plumbing check
 ```
 
-Redis 7 in Docker (needs Docker Desktop):
+Distributed runtime in Docker (needs Docker Desktop; Day 3):
 
 ```bash
-docker compose up -d --wait redis
-docker compose exec redis redis-cli ping
-docker compose down
+make up                                   # Redis + API on :8000 + 3 sim workers
+docker compose --profile minisched up -d  # + Python stand-in for atsd (testing only, until atsd exists)
+SIM_TIME_SCALE=0.1 make up                # sim tasks run 10x faster (65 s plan -> 6.5 s)
+docker compose up -d --scale worker=5     # more workers
+make down
+```
+
+Submit work and watch it:
+
+```bash
+# hand-written plan (no LLM), e.g. a fixture's "plan" object
+python3 -c "import json;print(json.dumps(json.load(open('examples/plans/company_research.json'))['plan']))" \
+  | curl -s -X POST localhost:8000/plans -H 'content-type: application/json' -d @-
+# typed request, planned by Groq (needs GROQ_API_KEY in .env; ATS_PLANNER=fake make up for offline)
+curl -s -X POST localhost:8000/requests -H 'content-type: application/json' -d '{"text": "Research Apple and NVIDIA and compare them"}'
+curl -s localhost:8000/requests/<request_id>          # status, per-task states, final output
+```
+
+`POST` returns 202 with the `request_id`, 422 with the validator's issues if the plan is rejected,
+and 502 if the LLM provider fails. `GET` shows `SUBMITTED` until the scheduler picks the request up.
+
+Worker and API without Docker (needs a Redis on localhost:6379, e.g. `docker compose up -d redis`):
+
+```bash
+cd worker && uv sync && uv run python -m worker                       # one worker; env: WORKER_CAPABILITIES, WORKER_CONCURRENCY, SIM_TIME_SCALE
+cd worker && uv run python -m worker.minisched ../examples/plans/diamond.json   # run one plan through the workers, print a timeline
+cd api && uv sync && uv run uvicorn api.app:app --port 8000
 ```
 
 Redis spike (Day 1 evening):
@@ -106,7 +132,7 @@ make redis-spike                # builds tools/redis_ping.cpp (PING, XADD, XRANG
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages and events on Redis Streams
-docs/DECISIONS.md                decisions made during the build (D15, D17–D23)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D26)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -133,6 +159,18 @@ scheduler/                       C++20 runtime (Person B)
                                  analysis, policies, scheduler, simulator invariants (Day 2); ats_sim CLI tests
 tests/parity.py                  C++ and Python validators vs expected_validation.json (make parity)
 tests/test_parity.py             Python validator vs C++ (ats_sim), schema freshness
+worker/                          Python worker (Person A, Day 3)
+  worker/main.py                 consumer loop: XREADGROUP, task_started, run, SET NX commit, task_completed/failed, XACK, heartbeat
+  worker/registry.py             (capability, task type) -> executor
+  worker/results.py              load dependency results, commit this task's result once
+  worker/executors/              Executor interface + error classes; sim executor (LLM executors: Day 4)
+  worker/minisched.py            Python stand-in for atsd, for testing only (D26)
+  Dockerfile, tests/
+api/                             FastAPI service (Person A, Day 3)
+  api/app.py                     POST /requests, POST /plans, GET /requests/{id}, GET /healthz
+  api/status.py                  merges plan:<id>, request:<id> and the sink's result
+  Dockerfile, tests/
+docker-compose.yml               redis, api, worker (3 replicas), minisched (profile)
 ```
 
 ## Day 1 status: Person A
@@ -180,3 +218,13 @@ tests/test_parity.py             Python validator vs C++ (ats_sim), schema fresh
 - [x] Message contract (#2) reviewed and signed off
 
 Test counts at the end of Day 2: 81 C++ tests (ctest) and 95 Python tests, all passing; parity agrees on all 12 fixtures.
+
+## Day 3 status: Person A
+
+- [x] Worker (`worker/`): asyncio consumer group `workers` on `tasks:<capability>`, configurable concurrency, executor registry, sim executor (duration hint × `SIM_TIME_SCALE`), dependency inputs loaded by task id, `SET NX` commit (first commit wins), `task_started` / `task_completed` / `task_failed` events, acknowledge only after the event (D24), heartbeat to `worker:<id>` with a 10 s TTL, graceful stop on SIGTERM
+- [x] Error classification: `RetryableError` (with `retry_after_ms`), `PermanentError`, unclassified → retryable; malformed messages reported as permanent failures
+- [x] API (`api/`): `POST /plans`, `POST /requests` (Groq or fake planner, repair loop), `GET /requests/{id}` with per-task states, spliced tasks and the final output; runtime-assigned `request_id`
+- [x] Request intake and status format proposed for atsd (`docs/messages.md`, D25), shared key names in `planner/planner/keys.py`
+- [x] Dockerfiles for worker and API; `docker-compose.yml` with 3 worker replicas; `make up` / `make down`; CI job with a Redis service
+- [x] Rehearsal of the Day 3 gate with the Python stand-in for atsd (D26): `company_research` submitted through the API ran on 3 worker containers in 6.54 s at `SIM_TIME_SCALE=0.1`, against 6.50 s from `ats_sim` (65 s × 0.1); every task started within 0.03 s of its simulated start time
+- [ ] Day 3 gate with the real atsd (Person B): same plan, 3 workers, timeline matches `ats_sim` within overhead
