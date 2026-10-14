@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo up down clean redis-deps redis-spike
+.PHONY: build test cpp-test py-test parity demo worker-demo clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -11,16 +11,12 @@ test: cpp-test py-test
 cpp-test: build
 	cd $(BUILD) && ctest --output-on-failure
 
-# Planner, worker and API unit tests. Worker and API tests start a throwaway redis-server
-# (or use ATS_TEST_REDIS_URL); they are skipped if neither is available.
 py-test:
-	cd planner && uv run pytest -q
-	cd worker && uv run pytest -q
-	cd api && uv run pytest -q
-	uv run --project planner pytest -q tests/test_parity.py
+	cd planner && uv run pytest
+	uv run --project planner pytest tests/test_parity.py
 
 parity: build
-	python3 tests/parity.py
+	uv run --project planner python tests/parity.py
 
 demo: build
 	@echo "== company_research, FIFO, 2 workers =="
@@ -32,13 +28,18 @@ demo: build
 	@echo "== failure injected on t1: descendants cancelled, independent branch finishes =="
 	-./$(BUILD)/ats_sim examples/plans/company_research.json --fail t1 | tail -3
 
-# Redis + API + 3 sim workers in Docker (Day 3). Add --profile minisched to run the Python
-# stand-in for atsd until the C++ service exists.
-up:
-	docker compose up -d --build --wait
+# Needs Redis on localhost:6379 (make redis-up). Three sim workers + the dev runner on one plan.
+worker-demo:
+	cd planner && pids=""; \
+	for i in 1 2 3; do uv run python -m planner.worker --stream tasks:sim --worker-id w$$i --time-scale 0.1 & pids="$$pids $$!"; done; \
+	uv run python -m planner.devrun ../examples/plans/company_research.json; status=$$?; \
+	kill $$pids 2>/dev/null; exit $$status
 
-down:
-	docker compose --profile minisched down
+redis-up:
+	docker compose up -d --wait redis
+
+redis-down:
+	docker compose down
 
 redis-deps:
 	./scripts/install_redis_deps.sh

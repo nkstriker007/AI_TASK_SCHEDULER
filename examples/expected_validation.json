@@ -72,5 +72,17 @@
       "SCHEMA"
     ],
     "warnings": []
+  },
+  "long_request_id": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "invalid_empty_created_at": {
+    "valid": false,
+    "errors": [
+      "SCHEMA"
+    ],
+    "warnings": []
   }
 }

@@ -20,6 +20,14 @@ jobs:
 
   planner:
     runs-on: ubuntu-latest
+    services:
+      redis:                      # worker tests (tests/test_worker.py) run against a real Redis
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
+    env:
+      ATS_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -27,23 +35,3 @@ jobs:
         run: cd planner && uv run pytest
       - name: Schema freshness and parity tests
         run: uv run --project planner pytest tests/test_parity.py
-
-  worker-api:
-    runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 15
-    env:
-      ATS_TEST_REDIS_URL: redis://localhost:6379/15  # tests flush this database
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - name: Worker tests
-        run: cd worker && uv run pytest
-      - name: API tests
-        run: cd api && uv run pytest
-      - name: Docker images build
-        run: docker compose build
