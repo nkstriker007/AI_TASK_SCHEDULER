@@ -11,17 +11,22 @@ from __future__ import annotations
 
 import asyncio
 
+from planner.schema import TaskType
+
 from .base import ExecutionContext, ExecutionResult, Executor
+
+DEFAULT_SIM_FANOUT = 2
 
 
 class SimExecutor(Executor):
     capability = "sim"
 
-    def __init__(self, time_scale: float = 1.0, default_seconds: float = 10.0):
-        if time_scale < 0 or default_seconds < 0:
-            raise ValueError("time_scale and default_seconds must be >= 0")
+    def __init__(self, time_scale: float = 1.0, default_seconds: float = 10.0, fanout: int = DEFAULT_SIM_FANOUT):
+        if time_scale < 0 or default_seconds < 0 or fanout < 1:
+            raise ValueError("time_scale and default_seconds must be >= 0, fanout >= 1")
         self.time_scale = time_scale
         self.default_seconds = default_seconds
+        self.fanout = fanout
 
     def duration(self, ctx: ExecutionContext) -> float:
         hint = ctx.message.estimated_seconds
@@ -31,6 +36,14 @@ class SimExecutor(Executor):
         seconds = self.duration(ctx)
         await asyncio.sleep(seconds)
         msg = ctx.message
+        if msg.type == TaskType.expand:
+            # A canned subplan of `fanout` research tasks, so atsd's splice path can run
+            # without an LLM (D28).
+            return ExecutionResult(result_kind="subplan", output={"tasks": [
+                {"id": f"s{i}", "type": "research", "title": f"Item {i} from {msg.task_id}",
+                 "instruction": f"Research item {i} found by {msg.task_id}.", "depends_on": []}
+                for i in range(1, self.fanout + 1)
+            ]})
         return ExecutionResult(
             output={
                 "content": f"[sim] {msg.type.value} {msg.task_id}: {msg.instruction[:200]}",

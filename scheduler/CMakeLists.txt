@@ -11,6 +11,7 @@ endif()
 
 option(ATS_BUILD_TESTS "Build unit tests" ON)
 option(ATS_WITH_REDIS "Build the Redis connectivity spike (needs hiredis + redis++)" OFF)
+option(ATS_WITH_ATSD "Build the atsd scheduler service if hiredis is found" ON)
 
 include(FetchContent)
 FetchContent_Declare(nlohmann_json
@@ -27,7 +28,8 @@ add_library(ats_core
   src/Analysis.cpp
   src/Policy.cpp
   src/Scheduler.cpp
-  src/Simulator.cpp)
+  src/Simulator.cpp
+  src/Service.cpp)
 target_include_directories(ats_core PUBLIC include)
 target_link_libraries(ats_core PUBLIC nlohmann_json::nlohmann_json)
 if(MSVC)
@@ -42,9 +44,30 @@ target_link_libraries(ats_validate PRIVATE ats_core)
 add_executable(ats_sim tools/ats_sim.cpp)
 target_link_libraries(ats_sim PRIVATE ats_core)
 
+# ---- atsd: the scheduler service (hiredis) ----
+if(ATS_WITH_ATSD)
+  set(ATS_DEPS_PREFIX "" CACHE PATH "Extra prefix where hiredis/redis++ are installed")
+  find_path(HIREDIS_INCLUDE hiredis/hiredis.h HINTS ${ATS_DEPS_PREFIX}/include /opt/homebrew/include /usr/local/include)
+  find_library(HIREDIS_LIB NAMES hiredis HINTS ${ATS_DEPS_PREFIX}/lib /opt/homebrew/lib /usr/local/lib)
+  if(HIREDIS_INCLUDE AND HIREDIS_LIB)
+    add_library(ats_redis src/RedisBus.cpp)
+    target_include_directories(ats_redis PUBLIC include)
+    target_include_directories(ats_redis SYSTEM PUBLIC ${HIREDIS_INCLUDE})  # no warnings from hiredis's own headers
+    target_link_libraries(ats_redis PUBLIC ${HIREDIS_LIB})
+    add_executable(atsd tools/atsd.cpp)
+    target_link_libraries(atsd PRIVATE ats_core ats_redis)
+    if(NOT MSVC)
+      target_compile_options(ats_redis PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
+      target_compile_options(atsd PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
+    endif()
+    message(STATUS "atsd: building with hiredis ${HIREDIS_LIB}")
+  else()
+    message(WARNING "hiredis not found: atsd is not built (macOS: brew install hiredis, Debian/Ubuntu: apt install libhiredis-dev)")
+  endif()
+endif()
+
 if(ATS_WITH_REDIS)
   # macOS: brew install hiredis redis-plus-plus   Linux: scripts/install_redis_deps.sh
-  set(ATS_DEPS_PREFIX "" CACHE PATH "Extra prefix where hiredis/redis++ are installed")
   find_path(REDISPP_INCLUDE sw/redis++/redis++.h HINTS ${ATS_DEPS_PREFIX}/include /opt/homebrew/include /usr/local/include REQUIRED)
   find_library(REDISPP_LIB NAMES redis++ HINTS ${ATS_DEPS_PREFIX}/lib /opt/homebrew/lib /usr/local/lib REQUIRED)
   find_library(HIREDIS_LIB NAMES hiredis HINTS ${ATS_DEPS_PREFIX}/lib /opt/homebrew/lib /usr/local/lib REQUIRED)
@@ -80,7 +103,8 @@ if(ATS_BUILD_TESTS)
     tests/test_analysis.cpp
     tests/test_policy.cpp
     tests/test_scheduler.cpp
-    tests/test_simulator.cpp)
+    tests/test_simulator.cpp
+    tests/test_service.cpp)
   target_link_libraries(ats_tests PRIVATE ats_core GTest::gtest_main GTest::gmock)
   target_compile_definitions(ats_tests PRIVATE
     ATS_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../examples/plans"

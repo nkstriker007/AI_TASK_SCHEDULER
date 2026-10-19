@@ -146,3 +146,13 @@ def test_get_running_and_finished_request(redis_url, r):
     assert states["t1"] == ("RUNNING", 2) and states["t3"] == ("WAITING", 0) and states["t2.1"] == ("QUEUED", 1)
     assert running["output"] is None
     assert finished["status"] == "SUCCEEDED" and finished["output"] == {"content": "final report"}
+
+
+def test_plain_text_result_is_returned_not_a_500(redis_url, r):
+    with client(redis_url) as c:
+        rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]
+        r.hset(keys.request_key(rid), mapping={"status": "SUCCEEDED", "sink": "t3",
+                                               "task:t3": json.dumps({"state": "COMPLETED", "attempt": 1})})
+        r.set(result_key(rid, "t3"), "[sim] report t3 using t2")  # pre-JSON result value
+        resp = c.get(f"/requests/{rid}")
+    assert resp.status_code == 200 and resp.json()["output"] == "[sim] report t3 using t2"

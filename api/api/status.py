@@ -62,7 +62,10 @@ async def request_status(redis: Redis, request_id: str) -> dict[str, Any] | None
     if sink and sink_state == "COMPLETED":
         raw_result = await redis.get(result_key(request_id, sink))
         if raw_result is not None:
-            output = json.loads(raw_result)
+            try:
+                output = json.loads(raw_result)  # results are JSON (contract #2)
+            except json.JSONDecodeError:
+                output = raw_result  # written before results were JSON: return the text, never a 500
 
     return {
         "request_id": request_id,

@@ -59,6 +59,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "ats-planner" },
+    { name = "groq" },
     { name = "redis" },
 ]
 
@@ -70,6 +71,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ats-planner", editable = "../planner" },
+    { name = "groq", specifier = ">=0.30" },
     { name = "redis", specifier = ">=5.0" },
 ]
 

@@ -94,3 +94,16 @@ def test_event_without_event_field_is_rejected():
     del data["event"]
     with pytest.raises(ValidationError):
         TaskEvent.model_validate(data)
+
+
+# --- result values ------------------------------------------------------------------
+
+
+def test_encode_output_and_result_text_round_trip():
+    from planner.messages import encode_output, result_text
+
+    value = encode_output("Apple grew 8%.", key_points=["revenue"])
+    assert json.loads(value) == {"content": "Apple grew 8%.", "key_points": ["revenue"]}
+    assert result_text(value) == "Apple grew 8%."
+    assert result_text('{"tasks":[{"id":"s1"}]}') == '{"tasks":[{"id":"s1"}]}'   # a Subplan stays JSON
+    assert result_text("plain text from before JSON results") == "plain text from before JSON results"

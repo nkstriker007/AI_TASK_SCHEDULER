@@ -29,6 +29,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from planner import keys
+from planner.schema import TaskType
 from planner.messages import (
     ATTEMPT_ID_PATTERN,
     STREAM_FIELD,
@@ -83,6 +84,10 @@ class WorkerConfig:
         return cfg
 
 
+class _AlreadyCommitted(Exception):
+    """Internal signal: the result key already exists, so this attempt does not run."""
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -97,7 +102,8 @@ class Worker:
     ):
         self.redis = redis
         self.config = config
-        self.registry = registry or default_registry(config.sim_time_scale, config.sim_default_seconds)
+        self.registry = registry or default_registry(config.sim_time_scale, config.sim_default_seconds,
+                                                     config.capabilities)
         self.clock_ms = clock_ms
         self.streams = {keys.task_stream(c): c for c in config.capabilities}
         self._inflight: set[asyncio.Task] = set()
@@ -163,11 +169,18 @@ class Worker:
 
         await self._emit(TaskStarted(event="task_started", **self._base(message)))
         started = time.monotonic()
+        key = result_key(message.request_id, message.task_id)
+        kind = "subplan" if message.type == TaskType.expand else "output"
         try:
+            if self.clock_ms() >= message.deadline_ms:
+                # atsd has already declared this attempt lost and dispatched another (8.7).
+                raise RetryableError("deadline passed before the attempt started")
+            if await self.redis.exists(key):
+                # An earlier attempt already committed: report it without running again (D24).
+                raise _AlreadyCommitted
             executor = self.registry.get(self.streams[stream], message.type)
             inputs = await load_inputs(self.redis, message)
             result = await executor.run(ExecutionContext(message=message, inputs=inputs))
-            key = result_key(message.request_id, message.task_id)
             committed = await commit_result(self.redis, key, result.output)
             event = TaskCompleted(
                 event="task_completed",
@@ -179,6 +192,9 @@ class Worker:
                 tokens_in=result.tokens_in,
                 tokens_out=result.tokens_out,
             )
+        except _AlreadyCommitted:
+            event = TaskCompleted(event="task_completed", **self._base(message), result_key=key,
+                                  committed=False, result_kind=kind, exec_ms=0)
         except RetryableError as exc:
             event = self._failed(message, "retryable", str(exc), exc.retry_after_ms)
         except PermanentError as exc:

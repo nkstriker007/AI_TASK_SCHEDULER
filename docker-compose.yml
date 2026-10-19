@@ -1,14 +1,17 @@
-# Day 3: Redis 7, the API and 3 workers. atsd (C++, Person B) is added as its own service.
+# Day 3: Redis 7, atsd (the C++ scheduler), the API and 3 workers.
 #
-#   docker compose up -d --build                     # redis + api (port 8000) + 3 workers
+#   docker compose up -d --build                     # redis + atsd + api (port 8000) + 3 workers
 #   docker compose up -d --scale worker=5            # change the number of workers
-#   docker compose --profile minisched up -d         # also run the Python stand-in for atsd (testing only;
-#                                                    # never together with atsd)
-#   docker compose logs -f worker
+#   docker compose logs -f atsd worker
 #   docker compose down                              # stop (add -v to drop the Redis data volume)
 #
 # SIM_TIME_SCALE shrinks every sim task's duration (0.1 runs a 65 s plan in 6.5 s), e.g.
 #   SIM_TIME_SCALE=0.1 docker compose up -d
+# atsd writes its event log to ./runs/<run_id>/events.jsonl.
+#
+# minisched (profile) is the Python stand-in used before atsd existed. It consumes requests:new
+# like atsd does, so never run both:
+#   docker compose --profile minisched up -d --scale atsd=0
 services:
   redis:
     image: redis:7-alpine
@@ -22,6 +25,23 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
+
+  atsd:
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ATSD_CAPABILITY: ${ATSD_CAPABILITY:-sim}   # the workers below serve tasks:sim
+      ATSD_POLICY: ${ATSD_POLICY:-fifo}
+      ATSD_SIM_TIMEOUT_MS: ${ATSD_SIM_TIMEOUT_MS:-300000}
+      ATSD_RUNS_DIR: /runs
+    volumes:
+      - ./runs:/runs
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   api:

@@ -38,7 +38,7 @@ Changing anything here takes a PR that updates `planner/planner/schema.py`, the 
 }
 ```
 
-`request_id` and `created_at` are non-empty strings assigned by the runtime, with no maximum length on either side (fixtures `invalid_empty_created_at` and `long_request_id`). Unknown fields are errors at every level (Pydantic `extra="forbid"`). Lengths are counted in Unicode characters, not bytes.
+`request_id` and `created_at` are non-empty strings assigned by the runtime, with no maximum length on either side (fixtures `invalid_empty_created_at` and `long_request_id`). Unknown fields are errors at every level (Pydantic `extra="forbid"`). Lengths are counted in Unicode characters, not bytes. Types are strict and nothing is converted: a string or boolean is not a number, `2.0` is not an integer, and `schema_version` must be the integer `1` (`true`, `1.0` or `"1"` is `SCHEMA_VERSION`).
 
 ## Additions beyond the design doc's section 4
 
@@ -68,17 +68,19 @@ The details that decide parity:
    **Known difference (to settle before parity covers it):** Python still runs the graph checks when there are schema errors, using the tasks that have a string `id`. C++ runs `Dag::build` only after `PlanLoader` passes, so a plan with both kinds of error gets only `SCHEMA` from C++. No fixture mixes the two, so parity passes today.
 2. Self-edges are reported only as `SELF_DEPENDENCY` and are left out of Kahn. Unknown dependencies and repeated dependencies are left out too, so `invalid_self_dep` has no `CYCLE`.
 3. If any ID is duplicated, skip the cycle check because the graph is ambiguous.
-4. The C++ side checks that text fields are non-empty. The length limits are enforced only in Python (design doc 3.8), and the fixtures don't depend on them.
+4. Both sides enforce the same length limits, counted in Unicode characters: `summary` 1–300, `title` 1–120, `instruction` 1–2000. `request_id` and `created_at` must be non-empty and have no upper limit. (This goes beyond design doc 3.8, which required only non-empty text from C++.)
 
 Pydantic reports some of these as ordinary validation errors, so the Python validator maps them: `tasks` too short → `EMPTY_PLAN`, too long → `TOO_MANY_TASKS`, `schema_version` failing `Literal[1]` → `SCHEMA_VERSION`, everything else → `SCHEMA`. Parity is checked on codes only; messages may differ.
 
 ## Parity checks
 
 - `make parity` (`tests/parity.py`): runs `scheduler/build/ats_validate <plan.json>` and `planner.check` over every fixture and compares both with `examples/expected_validation.json`. `ats_validate` prints `{"valid": bool, "issues": [{"code", "task_id", "message"}], ...}` and exits 0 when the plan is valid, 1 when it is invalid.
-- `tests/test_parity.py`: the same comparison against `ats_sim` once it exists (Day 2), plus schema freshness.
+- `tests/test_parity.py`: the same comparison against `ats_sim` (built on Day 2), plus schema freshness. It is skipped when `ats_sim` has not been built.
 
-## ats_sim expectations used by `tests/test_parity.py`
+## ats_sim behaviour used by `tests/test_parity.py`
 
-- Exit code 1 means the plan is invalid. Exit 0 (succeeded) and exit 2 (execution failed) both count as a valid plan.
-- With `--json`, an invalid plan prints `{"valid": false, "issues": [{"code": "...", "task_id": "...", "message": "..."}]}`. The parity test then compares the set of error codes too.
+`ats_sim` (Person B, Day 2) loads a plan file with the same `PlanLoader` and `Dag::build` as `ats_validate`, then simulates it.
+
+- Exit code 1 means the plan is invalid (or the arguments are). Exit 0 (every task completed) and exit 2 (execution failed, e.g. with `--fail`) both mean the plan was valid.
+- With `--json`, an invalid plan prints `{"valid": false, "issues": [{"code": "...", "task_id": "...", "message": "..."}]}`, and the parity test compares the set of error codes too. A valid plan prints `"valid": true` plus the simulation report (`request_id`, `policy`, `workers`, `makespan`, `sequential_seconds`, the critical path, events and attempts).
 - The binary is found at `scheduler/build/ats_sim`, or at `$ATS_SIM` if that is set.

@@ -5,6 +5,7 @@ description = "AI Task Scheduler worker: consumes task streams, runs executors, 
 requires-python = ">=3.11"
 dependencies = [
     "ats-planner",
+    "groq>=0.30",
     "redis>=5.0",
 ]
 

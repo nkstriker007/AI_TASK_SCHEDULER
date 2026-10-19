@@ -25,6 +25,17 @@ Each stream entry has **one field, `data`**, whose value is the message as a JSO
 - `task_id` is a plan ID (`t5`) or a spliced subplan ID (`t2.1`). Subplan-local IDs (`s1`) never appear in messages. `t2.join` is completed inside atsd and never dispatched.
 - Result key = `result:<request_id>:<task_id>`, written once by the worker with `SET NX`.
 
+## Result values
+
+The value at a result key is always JSON (design doc 8.9):
+
+| Task | Value | Example |
+|---|---|---|
+| any type except `expand` | an object with at least a `content` string; executors may add fields such as `key_points` or `sources` | `{"content": "Apple's revenue grew 8%…", "key_points": ["…"]}` |
+| `expand` (`result_kind: "subplan"`) | the Subplan itself (contract #1) | `{"tasks": [{"id": "s1", "type": "research", …}]}` |
+
+Helpers in `planner/planner/messages.py`: `encode_output(content, **extra)` builds the stored value, and `result_text(value)` turns a stored value back into text for a downstream prompt (`content` for an output, compact JSON for a Subplan). Readers tolerate a non-JSON value, from before this rule, by treating it as plain text; writers must always store JSON.
+
 ## TaskMessage (one dispatched attempt)
 
 ```json
@@ -59,9 +70,9 @@ Every event has `event`, `attempt_id`, `worker_id` (non-empty) and `ts_ms` (work
 
 `committed: false` means `SET NX` found an earlier attempt's result, so this attempt's output was discarded. atsd treats the first `task_completed` for a task as the completion and records later ones (8.5).
 
-## Request intake and status (proposed on Day 3, needs Person B's sign-off)
+## Request intake and status (agreed on Day 3)
 
-The design doc names these keys (8.3) but doesn't define their contents. The API and the worker side are built against the format below. Key and stream names are in `planner/planner/keys.py`. `worker/worker/minisched.py`, a Python stand-in for atsd used only for testing, writes exactly this format, so it can serve as a reference.
+The design doc names these keys (8.3) but doesn't define their contents. This format was proposed on Day 3 and approved by Person B; the API reads it and atsd writes it. Key and stream names are in `planner/planner/keys.py`. `worker/worker/minisched.py`, a Python stand-in for atsd used only for testing, writes exactly this format, so it can serve as a reference.
 
 | Key | Type | Writer → reader | Content |
 |---|---|---|---|
@@ -83,19 +94,20 @@ While the hash doesn't exist, the API reports the request as `SUBMITTED` with ev
 
 ## How the scheduler applies messages and events
 
-Person B's Day 2 `Scheduler` (`scheduler/include/ats/Scheduler.hpp`) already exposes one call per message or event, so atsd (Day 3) only has to translate between Redis entries and these calls. It never reads a clock or does I/O itself; deadlines and retry limits live in the service layer (design doc 8.5–8.7).
+atsd (`scheduler/src/Service.cpp`, run by `scheduler/tools/atsd.cpp`) translates between Redis entries and the Day 2 `Scheduler` calls. The `Scheduler` and `ExecutionState` never read a clock or do I/O; deadlines, backoff and retry limits live in the service (design doc 8.5–8.7, D33).
 
 | Message or event | Scheduler call | State change |
 |---|---|---|
-| atsd writes a `TaskMessage` | `dispatchNext()` returns `{node, attempt}` | READY or RETRYING → QUEUED; `attempt` and `attempt_id` come from the returned attempt number |
-| `task_started` | `started(n)` | QUEUED → RUNNING |
-| first `task_completed` for the task | `complete(n)` | QUEUED or RUNNING → COMPLETED; children whose last dependency this was become READY. QUEUED is accepted because a `task_started` can be lost or arrive late |
-| a later `task_completed` for the same task | none | recorded only (8.5), so children are never released twice |
-| `task_failed` with `error_class: "retryable"` and attempts left | `retry(n)` | → RETRYING; the task re-enters the ready set and its next dispatch is a new message with `attempt + 1` |
-| `task_failed` with `"permanent"`, or retryable with no attempts left | `fail(n)` | → FAILED; every unfinished descendant → CANCELLED, and the request fails |
-| attempt deadline passes (Day 5) | same as a retryable `task_failed` | see 8.7 |
+| atsd writes a `TaskMessage` | `dispatchNext()` returns `{node, attempt}` | READY or RETRYING → QUEUED; `attempt` and `attempt_id` come from the returned attempt number; deadline = now + the capability's timeout |
+| `task_started` for the current attempt | `started(n)` | QUEUED → RUNNING. A started event for an older attempt is ignored |
+| first `task_completed` of **any** attempt | `complete(n)` | QUEUED or RUNNING → COMPLETED; children whose last dependency this was become READY. QUEUED is accepted because a `task_started` can be lost or arrive late; an older (lost) attempt's committed result is valid because tasks are pure (8.5 step 7) |
+| a later `task_completed` for the same task | none | recorded as a duplicate, so children are never released twice |
+| `task_failed` `retryable` for the current attempt, attempts left | after the backoff: `retry(n)` | the slot is freed at once; the task waits out the backoff (2 s, 4 s with jitter for llm, none for sim; at least `retry_after_ms`), then → RETRYING and is dispatched again with `attempt + 1` |
+| `task_failed` `permanent`, or retryable with no attempts left (default 3) | `fail(n)` | → FAILED; every unfinished descendant → CANCELLED, and the request fails once nothing is left running |
+| `task_failed` for an older attempt | none | that attempt was already handled when its deadline passed |
+| the current attempt's deadline passes | as a retryable `task_failed` | the only lost-attempt detector (D10); no XAUTOCLAIM |
 
-The simulator (`ats_sim --flaky` / `--fail`) drives the same calls today, so the retry and failure paths are already tested before Redis is involved.
+`atsd` writes `request:<id>` after every change (format above) and one JSON line per transition to `runs/<run_id>/events.jsonl` (8.12). Unit tests with a fake bus and a fake clock cover every row (`scheduler/tests/test_service.cpp`); `worker/tests/test_atsd_e2e.py` runs the real binary with real workers.
 
 ## Additions beyond the design doc's section 8.4 (agreed)
 
@@ -104,3 +116,4 @@ The simulator (`ats_sim --flaky` / `--fail`) drives the same calls today, so the
 3. `request_id` may not contain `:`, so `attempt_id` can be split unambiguously.
 4. `TaskCompleted.result_kind` defaults to `"output"`; only expand results send `"subplan"`.
 5. Events carry only `attempt_id` (as in 8.4); atsd recovers `request_id`, `task_id` and `attempt` by splitting it.
+6. Result values are JSON as described in "Result values": the design doc gives the output shape (8.9) but not how outputs and subplans share one key.

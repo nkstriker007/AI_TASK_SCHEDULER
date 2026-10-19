@@ -2,8 +2,8 @@
 
 The stream a message arrives on decides the capability: everything on tasks:sim
 runs the sim executor whatever its type, while tasks:llm picks an executor per
-task type. LLM executors arrive on Day 4; until then an llm task fails
-permanently with a clear message instead of hanging until its deadline.
+task type. A task with no registered executor fails permanently with a clear
+message instead of hanging until its deadline.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from collections.abc import Iterable
 
 from planner.schema import TaskType
 
-from .executors import Executor, PermanentError, SimExecutor
+from .executors import Executor, LLMExecutor, PermanentError, SimExecutor
 
 ALL_TYPES: tuple[TaskType, ...] = tuple(TaskType)
 
@@ -38,7 +38,14 @@ class ExecutorRegistry:
             raise PermanentError(f"no executor for task type {task_type.value!r} on capability {capability!r}") from None
 
 
-def default_registry(sim_time_scale: float = 1.0, sim_default_seconds: float = 10.0) -> ExecutorRegistry:
+def default_registry(sim_time_scale: float = 1.0, sim_default_seconds: float = 10.0,
+                     capabilities: Iterable[str] = ("sim",)) -> ExecutorRegistry:
+    """Executors for the capabilities this worker serves. The Groq client is only created
+    for an llm worker, so sim workers never need GROQ_API_KEY."""
+    caps = set(capabilities)
     registry = ExecutorRegistry()
-    registry.register(SimExecutor(time_scale=sim_time_scale, default_seconds=sim_default_seconds))
+    if "sim" in caps:
+        registry.register(SimExecutor(time_scale=sim_time_scale, default_seconds=sim_default_seconds))
+    if "llm" in caps:
+        registry.register(LLMExecutor())
     return registry

@@ -9,7 +9,7 @@ from planner import keys
 from planner.fake import load_fixture_plan
 from planner.messages import STREAM_FIELD, TaskEvent, TaskMessage, attempt_id, result_key
 from planner.schema import PlanFile
-from worker.executors import Executor, PermanentError, RetryableError
+from worker.executors import ExecutionResult, Executor, PermanentError, RetryableError
 from worker.main import Worker, WorkerConfig
 from worker.minisched import run_plan
 from worker.registry import ExecutorRegistry, default_registry
@@ -146,7 +146,7 @@ def test_executor_errors_become_task_failed(redis_url, exc, error_class, retry_a
 @with_redis
 async def test_llm_task_without_executor_fails_permanently(r):
     await enqueue(r, msg(), stream="tasks:llm")
-    await run_until(r, 1, config(capabilities=("llm",)))
+    await run_until(r, 1, config(capabilities=("llm",)), default_registry(capabilities=("sim",)))
     failed = (await events(r))[-1]
     assert failed.error_class == "permanent" and "no executor" in failed.message
 
@@ -254,3 +254,59 @@ async def test_company_research_on_three_workers_respects_every_edge(r):
     status = await r.hgetall(keys.request_key(pf.request_id))
     assert status["status"] == "SUCCEEDED" and status["sink"] == "t6"
     assert json.loads(status["task:t6"])["state"] == "COMPLETED"
+
+
+@with_redis
+async def test_existing_result_is_reported_without_running_again(r):
+    calls = []
+
+    class Counting(Executor):
+        capability = "sim"
+
+        async def run(self, ctx):
+            calls.append(ctx.message.attempt_id)
+
+    registry = ExecutorRegistry()
+    registry.register(Counting())
+    await r.set(result_key(RID, "t1"), json.dumps({"content": "from attempt 1"}))
+    await enqueue(r, msg(attempt=2))
+    await run_until(r, 1, config(), registry)
+    done = (await events(r))[-1]
+    assert calls == [] and (done.event, done.committed, done.exec_ms) == ("task_completed", False, 0)
+
+
+@with_redis
+async def test_attempt_past_its_deadline_is_not_run(r):
+    late = msg()
+    late = late.model_copy(update={"deadline_ms": int(time.time() * 1000) - 1})
+    await enqueue(r, late)
+    await run_until(r, 1, config())
+    failed = (await events(r))[-1]
+    assert (failed.event, failed.error_class) == ("task_failed", "retryable")
+    assert "deadline" in failed.message and await r.get(result_key(RID, "t1")) is None
+
+
+@with_redis
+async def test_losing_a_race_keeps_the_winners_result(r):
+    class Racing(Executor):
+        capability = "sim"
+
+        async def run(self, ctx):
+            await r.set(result_key(RID, "t1"), json.dumps({"content": "winner"}))  # another attempt commits first
+            return ExecutionResult(output={"content": "loser"})
+
+    registry = ExecutorRegistry()
+    registry.register(Racing())
+    await enqueue(r, msg(attempt=2))
+    await run_until(r, 1, config(), registry)
+    assert (await events(r))[-1].committed is False
+    assert json.loads(await r.get(result_key(RID, "t1"))) == {"content": "winner"}
+
+
+@with_redis
+async def test_sim_expand_commits_a_subplan(r):
+    await enqueue(r, msg("t2", type="expand"))
+    await run_until(r, 1, config())
+    done = (await events(r))[-1]
+    assert done.result_kind == "subplan"
+    assert [t["id"] for t in json.loads(await r.get(result_key(RID, "t2")))["tasks"]] == ["s1", "s2"]

@@ -13,7 +13,8 @@ Each stream entry has a single field `data` holding the message as JSON.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+import json
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
@@ -41,6 +42,33 @@ def parse_attempt_id(value: str) -> tuple[str, str, int]:
 
 def result_key(request_id: str, task_id: str) -> str:
     return f"result:{request_id}:{task_id}"
+
+
+# --- result values (the string stored at result_key) -------------------------------
+# Every result is JSON (design doc 8.9). An output is an object with at least a
+# "content" string, e.g. {"content": "...", "key_points": [...]}; an expand task's
+# result is the Subplan itself ({"tasks": [...]}).
+
+
+def encode_output(content: str, **extra: Any) -> str:
+    """The value a worker stores for an ordinary (non-expand) result."""
+    return json.dumps({"content": content, **extra}, ensure_ascii=False, separators=(",", ":"))
+
+
+def result_text(value: str) -> str:
+    """Text of a stored result, for putting into a downstream task's prompt.
+
+    Returns "content" for an output object, compact JSON for anything else (a
+    Subplan), and the value unchanged if it is not JSON (results written before
+    results were JSON).
+    """
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    if isinstance(parsed, dict) and isinstance(parsed.get("content"), str):
+        return parsed["content"]
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
 # --- tasks:llm / tasks:sim ------------------------------------------------------
@@ -132,6 +160,8 @@ __all__ = [
     "TaskMessage",
     "TaskStarted",
     "attempt_id",
+    "encode_output",
     "parse_attempt_id",
     "result_key",
+    "result_text",
 ]
