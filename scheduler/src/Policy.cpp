@@ -13,6 +13,16 @@ std::optional<NodeId> FifoPolicy::pop() {
   return n;
 }
 
+std::optional<NodeId> FifoPolicy::peek() const {
+  if (queue_.empty()) return std::nullopt;
+  return queue_.front();
+}
+
+std::optional<NodeId> CriticalPathPolicy::peek() const {
+  if (heap_.empty()) return std::nullopt;
+  return heap_.top();
+}
+
 void CriticalPathPolicy::push(NodeId n) {
   if (n >= bottom_.size()) throw std::out_of_range("CriticalPathPolicy: unknown task");
   heap_.push(n);

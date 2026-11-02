@@ -102,3 +102,31 @@ TEST(Scheduler, RejectsNullPolicy) {
   Dag g = mustBuild(planFile({task("t1")}));
   EXPECT_THROW(Scheduler(g, nullptr), std::invalid_argument);
 }
+
+TEST(Scheduler, PeekNextMatchesDispatch) {
+  using namespace ats::test;
+  ats::Dag g = mustBuild(planFile({task("t1"), task("t2", {"t1"}), task("t3")}));
+  ats::Scheduler s(g, std::make_unique<ats::FifoPolicy>());
+  s.start();
+  auto a = s.dispatchNext();
+  ASSERT_TRUE(a);
+  EXPECT_EQ(g.id(a->node), "t1");
+  EXPECT_EQ(s.peekNext(), node(g, "t3"));
+  EXPECT_EQ(s.dispatchNext()->node, node(g, "t3"));
+  EXPECT_FALSE(s.peekNext());
+}
+
+TEST(Scheduler, SharedTicketsOrderReadyTasksAcrossSchedulers) {
+  using namespace ats::test;
+  ats::Dag g1 = mustBuild(planFile({task("t1"), task("t2", {"t1"})}));
+  ats::Dag g2 = mustBuild(planFile({task("t1")}));
+  auto tickets = std::make_shared<std::uint64_t>(0);
+  ats::Scheduler s1(g1, std::make_unique<ats::FifoPolicy>(), tickets);
+  ats::Scheduler s2(g2, std::make_unique<ats::FifoPolicy>(), tickets);
+  s1.start();
+  s2.start();
+  EXPECT_LT(s1.readyTicket(node(g1, "t1")), s2.readyTicket(node(g2, "t1")));
+  auto d = s1.dispatchNext();
+  s1.complete(d->node);  // b becomes ready after x
+  EXPECT_GT(s1.readyTicket(node(g1, "t2")), s2.readyTicket(node(g2, "t1")));
+}

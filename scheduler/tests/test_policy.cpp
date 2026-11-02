@@ -47,3 +47,25 @@ TEST(Policy, Factory) {
   EXPECT_THROW(makePolicy("random", g, {1.0}), std::invalid_argument);
   EXPECT_THAT(policyNames(), ElementsAre("fifo", "critical-path"));
 }
+
+TEST(Policy, PeekReturnsWhatPopWouldWithoutRemovingIt) {
+  ats::FifoPolicy fifo;
+  EXPECT_FALSE(fifo.peek());
+  fifo.push(2);
+  fifo.push(0);
+  EXPECT_EQ(fifo.peek(), 2u);
+  EXPECT_EQ(fifo.size(), 2u);
+  EXPECT_EQ(fifo.pop(), 2u);
+  EXPECT_DOUBLE_EQ(fifo.priority(0), 0.0);
+
+  ats::CriticalPathPolicy cp({1.0, 9.0, 4.0});
+  cp.push(0);
+  cp.push(2);
+  cp.push(1);
+  EXPECT_EQ(cp.peek(), 1u);
+  EXPECT_EQ(cp.size(), 3u);
+  EXPECT_EQ(cp.pop(), 1u);
+  EXPECT_EQ(cp.peek(), 2u);
+  const ats::SchedulingPolicy& base = cp;
+  EXPECT_DOUBLE_EQ(base.priority(2), 4.0);  // virtual: visible through the interface
+}

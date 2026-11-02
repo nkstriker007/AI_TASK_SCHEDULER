@@ -40,6 +40,10 @@ class RedisBus final : public Bus {
   void ack(const std::string& stream, const std::string& group, const std::string& id) override;
   std::string add(const std::string& stream, const std::string& data) override;
   void hset(const std::string& key, const std::vector<std::pair<std::string, std::string>>& fields) override;
+  std::vector<BusEntry> readPending(const std::string& stream, const std::string& group, const std::string& consumer,
+                                    const std::string& afterId, int count) override;
+  std::optional<std::string> hget(const std::string& key, const std::string& field) override;
+  bool exists(const std::string& key) override;
 
  private:
   // Runs one command; the caller frees the reply. Throws on connection or Redis errors

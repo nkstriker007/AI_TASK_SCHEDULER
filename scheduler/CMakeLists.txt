@@ -120,4 +120,11 @@ if(ATS_BUILD_TESTS)
   set_tests_properties(cli_sim_invalid_plan PROPERTIES WILL_FAIL TRUE)
   add_test(NAME cli_sim_injected_failure COMMAND ats_sim ${PLANS}/company_research.json --fail t2)
   set_tests_properties(cli_sim_injected_failure PROPERTIES WILL_FAIL TRUE)
+
+  # Day 4: RedisBus and the Service against a real Redis (skipped when none is available).
+  if(TARGET ats_redis)
+    add_executable(ats_redis_tests tests/test_redis_integration.cpp)
+    target_link_libraries(ats_redis_tests PRIVATE ats_core ats_redis GTest::gtest_main GTest::gmock)
+    gtest_discover_tests(ats_redis_tests PROPERTIES RUN_SERIAL TRUE)
+  endif()
 endif()
