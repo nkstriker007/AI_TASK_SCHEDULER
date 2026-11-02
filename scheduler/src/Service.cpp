@@ -258,6 +258,15 @@ void Service::handleEvent(std::string_view text) {
         std::optional<std::int64_t> retryAfter;
         if (ev.contains("retry_after_ms") && ev["retry_after_ms"].is_number_integer())
           retryAfter = ev["retry_after_ms"].get<std::int64_t>();
+        if (retryAfter && *retryAfter > 0) {
+          // The provider said "try again in N ms" (e.g. a tokens-per-minute 429). That limit is
+          // shared by every task on this capability, so pause all of them, not just this one;
+          // otherwise the others keep using up the window and this task never gets through.
+          auto& until = pausedUntil_[nr.capability];
+          until = std::max(until, now_() + *retryAfter);
+          log("capability_paused", rid, tid, attempt, worker,
+              nr.capability + " for " + std::to_string(*retryAfter) + " ms");
+        }
         scheduleRetry(req, n, retryAfter, message);
       }
     } else {
@@ -282,6 +291,9 @@ void Service::tick() {
 
 std::optional<std::int64_t> Service::nextTimerMs() const {
   std::optional<std::int64_t> next;
+  const std::int64_t now = now_();
+  for (const auto& [cap, until] : pausedUntil_)
+    if (until > now && (!next || until < *next)) next = until;
   for (const auto& [id, req] : active_) {
     for (const auto& nr : req->nodes) {
       if (nr.inFlight && (!next || nr.deadlineMs < *next)) next = nr.deadlineMs;
@@ -369,6 +381,7 @@ std::size_t Service::inFlight(const std::string& capability) const {
 }
 
 bool Service::hasRoom(const std::string& capability) const {
+  if (auto p = pausedUntil_.find(capability); p != pausedUntil_.end() && now_() < p->second) return false;
   const std::size_t cap = capabilityConfig(capability).maxInFlight;
   return cap == 0 || inFlight(capability) < cap;
 }

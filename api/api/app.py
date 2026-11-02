@@ -2,7 +2,9 @@
 
     POST /requests {"text": ...}   plan with the LLM, validate, enqueue
     POST /plans    {ExecutionPlan} validate and enqueue a hand-written plan (benchmarks, tests)
-    GET  /requests/{request_id}    status, per-task states, final output once the sink completes
+    GET  /requests/{request_id}    status, per-task states, token usage, final output once the sink
+                                   completes (?include_outputs=true adds every completed task's output)
+    GET  /requests/{request_id}/report   the final output as Markdown (409 until the request succeeds)
     GET  /healthz                  Redis reachable
 
 Enqueueing writes plan:{req} (so status works immediately) and then appends the
@@ -12,31 +14,37 @@ Configuration (environment):
     REDIS_URL            default redis://localhost:6379/0
     ATS_PLANNER          "groq" (default; needs GROQ_API_KEY) or "fake"
     ATS_FAKE_FIXTURE     fixture returned by the fake planner (default company_research)
+    ATS_ARTIFACTS_DIR    where workers spill large results (default artifacts; shared volume)
 """
 
 from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from groq import GroqError
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from starlette.concurrency import run_in_threadpool
 
 from planner import keys
+from planner.artifacts import artifacts_root
 from planner.cli import make_plan_file
 from planner.llm import Planner, PlanRejected
 from planner.messages import REQUEST_ID_PATTERN, STREAM_FIELD
 from planner.schema import ExecutionPlan, ValidationIssue
 from planner.validate import validate_plan
 
-from .status import SUBMITTED, request_status
+from .status import SUBMITTED, render_report, request_status
 
 MAX_REQUEST_CHARS = 4000
 
@@ -89,12 +97,19 @@ def _accepted(request_id: str, plan: ExecutionPlan, warnings: list[ValidationIss
     })
 
 
-def create_app(redis_url: str | None = None, planner_factory: Callable[[], Planner] | None = None) -> FastAPI:
+def create_app(redis_url: str | None = None, planner_factory: Callable[[], Planner] | None = None,
+               artifacts_dir: Path | None = None) -> FastAPI:
     redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    artifacts_dir = artifacts_dir or artifacts_root()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.redis = Redis.from_url(redis_url, decode_responses=True)
+        # Retries on connection errors, so a Redis restart does not turn the next request into a
+        # 500 (same settings as worker/worker/redis_client.py).
+        app.state.redis = Redis.from_url(
+            redis_url, decode_responses=True, health_check_interval=30,
+            retry=Retry(ExponentialBackoff(cap=2.0, base=0.1), retries=5),
+            retry_on_error=[RedisConnectionError, RedisTimeoutError])
         app.state.planner_factory = planner_factory or planner_from_env()
         try:
             yield
@@ -130,14 +145,24 @@ def create_app(redis_url: str | None = None, planner_factory: Callable[[], Plann
         request_id = await enqueue(request.app.state.redis, plan)
         return _accepted(request_id, plan, warnings, planner_attempts=planner.last_attempts)
 
-    @app.get("/requests/{request_id}")
-    async def get_request(request: Request, request_id: str):
+    async def _status(request: Request, request_id: str, include_outputs: bool = False) -> dict:
         if not re.fullmatch(REQUEST_ID_PATTERN, request_id):
             raise HTTPException(status_code=404, detail="unknown request")
-        status = await request_status(request.app.state.redis, request_id)
+        status = await request_status(request.app.state.redis, request_id, artifacts_dir, include_outputs)
         if status is None:
             raise HTTPException(status_code=404, detail="unknown request")
         return status
+
+    @app.get("/requests/{request_id}")
+    async def get_request(request: Request, request_id: str, include_outputs: bool = False):
+        return await _status(request, request_id, include_outputs)
+
+    @app.get("/requests/{request_id}/report", response_class=PlainTextResponse)
+    async def get_report(request: Request, request_id: str):
+        status = await _status(request, request_id)
+        if status["status"] != "SUCCEEDED":
+            raise HTTPException(status_code=409, detail=f"request is {status['status']}, no report yet")
+        return PlainTextResponse(render_report(status), media_type="text/markdown; charset=utf-8")
 
     return app
 

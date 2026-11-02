@@ -13,7 +13,14 @@ import pytest
 from planner.messages import TaskMessage
 from planner.validate import validate_subplan
 from worker.executors import ExecutionContext, LLMExecutor, PermanentError, RetryableError, SimExecutor
-from worker.executors.llm import LLM_SUBPLAN_SCHEMA, build_user_message, classify_provider_error
+from planner.schema import TaskType
+from worker.executors.llm import (
+    LLM_OUTPUT_SCHEMA,
+    LLM_SUBPLAN_SCHEMA,
+    build_user_message,
+    classify_provider_error,
+    load_executor_prompt,
+)
 
 
 def msg(task_id="t5", type="compare", inputs=(), estimated_seconds=15.0, deadline_s=60, attempt=1):
@@ -49,7 +56,7 @@ def test_sim_default_duration_matches_ats_sim():
 class FakeGroq:
     """Mimics AsyncGroq: chat.completions.create is awaited."""
 
-    def __init__(self, content="answer", error=None, usage=(120, 40)):
+    def __init__(self, content=json.dumps({"content": "answer", "key_points": ["a"]}), error=None, usage=(120, 40)):
         self.content, self.error, self.usage = content, error, usage
         self.calls = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
@@ -63,12 +70,14 @@ class FakeGroq:
 
 
 def test_llm_returns_answer_and_token_usage():
-    client = FakeGroq("NVIDIA grew faster.")
-    r = run(LLMExecutor(model="m", client=client), msg(inputs=["t3", "t4"]),
+    client = FakeGroq(json.dumps({"content": "NVIDIA grew faster.", "key_points": ["NVIDIA ahead", " "]}))
+    r = run(LLMExecutor(TaskType.compare, model="m", client=client), msg(inputs=["t3", "t4"]),
             {"t3": {"content": "Apple facts"}, "t4": {"content": "NVIDIA facts"}})
-    assert (r.output, r.result_kind, r.tokens_in, r.tokens_out) == ({"content": "NVIDIA grew faster."}, "output", 120, 40)
+    assert (r.output, r.result_kind, r.tokens_in, r.tokens_out) == \
+        ({"content": "NVIDIA grew faster.", "key_points": ["NVIDIA ahead"]}, "output", 120, 40)
     call = client.calls[0]
-    assert call["model"] == "m" and "response_format" not in call
+    assert call["model"] == "m"
+    assert call["response_format"]["json_schema"]["schema"] == LLM_OUTPUT_SCHEMA
     assert 0 < call["timeout"] <= 60
     user = call["messages"][1]["content"]
     assert "Apple facts" in user and "NVIDIA facts" in user and user.index("t3") < user.index("t4")
@@ -84,13 +93,43 @@ def test_inputs_are_ordered_by_task_number_and_rendered_as_text():
 def test_llm_refuses_to_call_after_the_deadline():
     client = FakeGroq()
     with pytest.raises(RetryableError):
-        run(LLMExecutor(client=client), msg(deadline_s=-1))
+        run(LLMExecutor(TaskType.compare, client=client), msg(deadline_s=-1))
     assert client.calls == []
 
 
-def test_llm_empty_answer_is_retryable():
+@pytest.mark.parametrize("content", [
+    "   ",
+    "not json",
+    json.dumps({"content": "", "key_points": []}),
+    json.dumps({"content": "x", "key_points": "not a list"}),
+])
+def test_llm_empty_or_malformed_answer_is_retryable(content):
     with pytest.raises(RetryableError):
-        run(LLMExecutor(client=FakeGroq("   ")), msg())
+        run(LLMExecutor(TaskType.compare, client=FakeGroq(content)), msg())
+
+
+def test_each_type_has_its_own_prompt():
+    prompts = {t: load_executor_prompt(t) for t in TaskType}
+    assert len(set(prompts.values())) == len(TaskType)
+    for t, text in prompts.items():
+        assert f"Task type: {t.value}." in text and "no web access" in text
+        assert ("key_points" in text) == (t != TaskType.expand)
+
+
+def test_executor_refuses_a_task_of_another_type():
+    with pytest.raises(PermanentError):
+        run(LLMExecutor(TaskType.report, client=FakeGroq()), msg(type="compare"))
+
+
+def test_registry_has_one_llm_executor_per_type(monkeypatch):
+    import worker.executors.llm as llm_module
+    from worker.registry import default_registry
+
+    monkeypatch.setattr(llm_module, "make_client", lambda: FakeGroq())
+    registry = default_registry(capabilities=("llm",))
+    executors = {t: registry.get("llm", t) for t in TaskType}
+    assert len({id(e) for e in executors.values()}) == len(TaskType)
+    assert all(e.task_type == t for t, e in executors.items())
 
 
 def test_llm_expand_uses_strict_schema_and_returns_validated_subplan():
@@ -101,7 +140,7 @@ def test_llm_expand_uses_strict_schema_and_returns_validated_subplan():
          "hints": {"estimated_seconds": 20}},
     ]}
     client = FakeGroq(json.dumps(raw))
-    r = run(LLMExecutor(client=client), msg(task_id="t2", type="expand"))
+    r = run(LLMExecutor(TaskType.expand, client=client), msg(task_id="t2", type="expand"))
     assert client.calls[0]["response_format"]["json_schema"]["strict"] is True
     assert r.result_kind == "subplan"
     assert "hints" not in r.output["tasks"][0]  # nulls dropped
@@ -117,10 +156,10 @@ def test_llm_expand_uses_strict_schema_and_returns_validated_subplan():
 ])
 def test_llm_bad_expand_output_is_retryable(content):
     with pytest.raises(RetryableError):
-        run(LLMExecutor(client=FakeGroq(content)), msg(task_id="t2", type="expand"))
+        run(LLMExecutor(TaskType.expand, client=FakeGroq(content)), msg(task_id="t2", type="expand"))
 
 
-def test_subplan_schema_meets_groq_strict_rules():
+def test_output_schemas_meet_groq_strict_rules():
     def objects(s):
         if isinstance(s, dict):
             if s.get("type") == "object":
@@ -130,7 +169,7 @@ def test_subplan_schema_meets_groq_strict_rules():
         elif isinstance(s, list):
             for v in s:
                 yield from objects(v)
-    for obj in objects(LLM_SUBPLAN_SCHEMA):
+    for obj in [*objects(LLM_SUBPLAN_SCHEMA), *objects(LLM_OUTPUT_SCHEMA)]:
         assert obj["additionalProperties"] is False
         assert sorted(obj["required"]) == sorted(obj["properties"])
 
@@ -166,5 +205,13 @@ def test_provider_errors_are_classified(exc, retryable, retry_after):
 def test_llm_wraps_provider_errors():
     error = provider_error("RateLimitError", 429, {"retry-after": "1"})
     with pytest.raises(RetryableError) as e:
-        run(LLMExecutor(client=FakeGroq(error=error)), msg())
+        run(LLMExecutor(TaskType.compare, client=FakeGroq(error=error)), msg())
     assert e.value.retry_after_ms == 1000
+
+
+def test_reasoning_effort_is_low_for_gpt_oss_only(monkeypatch):
+    monkeypatch.delenv("ATS_EXECUTOR_REASONING", raising=False)
+    client = FakeGroq()
+    run(LLMExecutor(TaskType.compare, model="openai/gpt-oss-120b", client=client), msg())
+    run(LLMExecutor(TaskType.compare, model="llama-3.3-70b-versatile", client=client), msg())
+    assert client.calls[0]["reasoning_effort"] == "low" and "reasoning_effort" not in client.calls[1]

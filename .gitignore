@@ -8,3 +8,4 @@ scheduler/build/
 runs/
 .DS_Store
 compile_commands.json
+artifacts/

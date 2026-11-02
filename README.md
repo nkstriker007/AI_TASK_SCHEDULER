@@ -25,7 +25,7 @@ make cpp-test                   # C++ only
 make py-test                    # Python only
 make e2e                        # atsd + workers end to end on a throwaway Redis
 make parity                     # C++ and Python validators vs examples/expected_validation.json
-make demo                       # ats_sim on company_research: 2 workers, unlimited workers, injected failure
+make demo                       # request -> plan -> ats_sim (offline fake planner); LIVE=1 for Groq, REQUEST="..." for your own
 ./scheduler/build/ats_validate examples/plans/invalid_cycle.json
 ```
 
@@ -79,6 +79,8 @@ CLI exit codes: 0 plan written, 1 plan rejected by the validator (after one repa
 Request → plan → simulated schedule (the Day 2 gate), end to end:
 
 ```bash
+make demo LIVE=1 REQUEST="Research AMD and Intel, compare them and write a report"   # one command
+# or step by step:
 cd planner && uv run --env-file ../.env python -m planner.cli "Research Apple and NVIDIA, compare them, write a report" -o ../plan.json
 cd .. && ./scheduler/build/ats_sim plan.json --workers 2
 ```
@@ -101,6 +103,7 @@ In Docker (needs Docker Desktop):
 
 ```bash
 make up                                   # Redis + atsd + API on :8000 + 3 sim workers
+make up-llm                               # same, with real Groq tasks (GROQ_API_KEY in .env; D38 limits)
 SIM_TIME_SCALE=0.1 make up                # sim tasks run 10x faster (65 s plan -> 6.5 s)
 docker compose up -d --scale worker=5     # more workers
 docker compose logs -f atsd worker
@@ -119,7 +122,9 @@ python3 -c "import json;print(json.dumps(json.load(open('examples/plans/company_
   | curl -s -X POST localhost:8000/plans -H 'content-type: application/json' -d @-
 # typed request, planned by Groq (needs GROQ_API_KEY in .env; ATS_PLANNER=fake make up for offline)
 curl -s -X POST localhost:8000/requests -H 'content-type: application/json' -d '{"text": "Research Apple and NVIDIA and compare them"}'
-curl -s localhost:8000/requests/<request_id>          # status, per-task states, final output
+curl -s localhost:8000/requests/<request_id>          # status, per-task states, token usage, final output
+curl -s 'localhost:8000/requests/<request_id>?include_outputs=true'   # + every completed task's output
+curl -s localhost:8000/requests/<request_id>/report   # the final report as Markdown (409 until it succeeds)
 ```
 
 `POST` returns 202 with the `request_id`, 422 with the validator's issues if the plan is rejected,
@@ -165,7 +170,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D34)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D40)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -175,6 +180,7 @@ planner/                         Python planner and shared contracts (Person A)
   planner/schema.py              Pydantic models: ExecutionPlan, PlanFile, Subplan (source of truth)
   planner/messages.py            Pydantic models: TaskMessage, task events, result value helpers (contract #2)
   planner/keys.py                Redis key and stream names shared by API, workers and atsd
+  planner/artifacts.py           artifact spill for results over 64 KB: pointer format, safe paths, read/write
   planner/validate.py            schema + semantic validation, all issue codes and warnings
   planner/llm.py                 Planner base class with the repair loop, GroqPlanner (strict structured output)
   planner/fake.py                FakePlanner: fixture plans, scripted outputs for tests
@@ -187,9 +193,10 @@ planner/                         Python planner and shared contracts (Person A)
 worker/                          Python worker (Person A, Day 3)
   worker/main.py                 consumer loop: XREADGROUP, task_started, run, SET NX commit, task_completed/failed, XACK, heartbeat
   worker/registry.py             (capability, task type) -> executor
-  worker/results.py              load dependency results, commit this task's result once
+  worker/results.py              load dependency results, commit once (spilling large results), token usage
+  worker/redis_client.py         Redis connection that survives a Redis restart
   worker/executors/              Executor interface + error classes; sim executor; Groq LLM executor (llm.py)
-  worker/prompts/                executor system prompt
+  worker/prompts/                executor prompts: common rules, one file per task type, output format
   worker/minisched.py            Python stand-in for atsd, for testing only (D26)
   Dockerfile, tests/
 api/                             FastAPI service (Person A, Day 3)
@@ -241,7 +248,7 @@ docker-compose.yml               redis, atsd, api, worker (3 replicas), minische
 - [x] Message contract (#2) signed off by Person A and Person B and frozen
 - [x] Python validator made strict (no type conversion), matching the C++ loader
 - [x] Request → live Groq plan → `ats_sim` works end to end (commands above)
-- [ ] `make demo` covers the full request → plan → simulation path (today it simulates a fixture plan)
+- [x] `make demo` covers the full request → plan → simulation path (offline by default, `LIVE=1` for Groq)
 
 ## Day 2 status: Person B
 
@@ -284,7 +291,21 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 
 - [x] **Passed.** `company_research` submitted through the API ran under atsd on 3 worker containers (`SIM_TIME_SCALE=0.1`) and SUCCEEDED. Every task started and finished within 0.03 s of `ats_sim --workers 3` × 0.1; makespan 6.53 s against 6.50 s (0.4 % overhead), work spread over all 3 workers.
 
+## Day 4 status: Person A
+
+- [x] LLM executors for all five types (and expand): one executor per type with its own prompt, Groq strict JSON output `{content, key_points}`, malformed output retryable, `reasoning_effort: low` for gpt-oss (D35, D38)
+- [x] Input loading: dependency results by task id, artifact files resolved
+- [x] Artifact spill: results over 64 KB written to `artifacts/<request>/<task>.<attempt>.json`, pointer in Redis, loser's file removed, paths confined to the directory (D36)
+- [x] Token accounting: `usage:<request_id>` per request and per task, in `GET /requests/{id}` (D37)
+- [x] Final output assembly in the API: artifacts resolved, several final tasks, `?include_outputs=true`, `GET /requests/{id}/report` as Markdown
+- [x] `make up-llm`: the stack with real Groq tasks, with limits that fit the on_demand tier (D38)
+- [x] Two problems found by the live gate and fixed: Groq tokens-per-minute 429s exhausted retries (in-flight cap, longer retry budget, low reasoning effort, and atsd pausing the whole LLM capability on `retry_after_ms`, D39); a stale Redis connection after a Redis restart made `POST /requests` return 500 (reconnecting clients, regression test, D40)
+
+## Day 4 gate
+
+- [x] **Passed.** Two typed requests submitted through `POST /requests` at the same time, planned by Groq (6 and 4 tasks), executed by Groq workers under atsd (`make up-llm`), both SUCCEEDED in 62 s and 20 s; `GET /requests/{id}/report` returned both reports. Rate-limited tasks recovered on attempts 2 and 3.
+
 Open items:
 
-- [ ] Person B: review atsd (`Service.cpp`, `RedisBus.cpp`, `tools/atsd.cpp`, D32–D34)
-- [ ] `make demo` covering request → plan → simulation (Day 2 leftover)
+- [ ] Person B: review atsd (`Service.cpp`, `RedisBus.cpp`, `tools/atsd.cpp`, D32–D34, D39)
+- [ ] Person B, Day 4: FairShare + CriticalPath across requests, clean shutdown that keeps in-flight attempts, integration tests against Redis

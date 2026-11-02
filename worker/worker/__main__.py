@@ -11,14 +11,13 @@ import asyncio
 import logging
 import signal
 
-from redis.asyncio import Redis
-
 from .main import Worker, WorkerConfig
+from .redis_client import connect
 
 
 async def _main() -> None:
     config = WorkerConfig.from_env()
-    redis = Redis.from_url(config.redis_url, decode_responses=True)
+    redis = connect(config.redis_url)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

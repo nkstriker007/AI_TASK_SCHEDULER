@@ -128,6 +128,7 @@ class Service {
   std::unordered_map<std::string, std::unique_ptr<RequestRun>> active_;
   std::unordered_set<std::string> finished_;  // done or rejected: later events and duplicates are ignored
   std::map<std::string, std::size_t> inFlight_;
+  std::map<std::string, std::int64_t> pausedUntil_;  // capability -> no dispatch before this time (provider throttling)
   std::uint64_t serveCounter_ = 0;  // dispatch sequence, for least-recently-served order
   Stats stats_;
 };

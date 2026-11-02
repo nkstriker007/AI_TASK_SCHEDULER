@@ -17,8 +17,8 @@ def r(redis_url):
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
-def client(redis_url, planner_factory=lambda: FakePlanner()):
-    return TestClient(create_app(redis_url=redis_url, planner_factory=planner_factory))
+def client(redis_url, planner_factory=lambda: FakePlanner(), artifacts_dir=None):
+    return TestClient(create_app(redis_url=redis_url, planner_factory=planner_factory, artifacts_dir=artifacts_dir))
 
 
 def queued(r):
@@ -156,3 +156,113 @@ def test_plain_text_result_is_returned_not_a_500(redis_url, r):
         r.set(result_key(rid, "t3"), "[sim] report t3 using t2")  # pre-JSON result value
         resp = c.get(f"/requests/{rid}")
     assert resp.status_code == 200 and resp.json()["output"] == "[sim] report t3 using t2"
+
+
+# --- Day 4: final output assembly ---------------------------------------------------
+
+
+def finish(r, rid, tasks, status="SUCCEEDED", sink="t3"):
+    r.hset(keys.request_key(rid), mapping={"status": status, "sink": sink, **{
+        f"task:{t}": json.dumps({"state": "COMPLETED", "attempt": 1}) for t in tasks}})
+
+
+def test_spilled_final_output_is_read_from_its_artifact(redis_url, r, tmp_path):
+    report = {"content": "# Report\n" + "y" * 70_000, "key_points": ["k"]}
+    with client(redis_url, artifacts_dir=tmp_path) as c:
+        rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]
+        (tmp_path / rid).mkdir()
+        (tmp_path / rid / "t3.1.json").write_text(json.dumps(report))
+        r.set(result_key(rid, "t3"), json.dumps({"artifact": f"{rid}/t3.1.json", "bytes": 70_020}))
+        finish(r, rid, ["t1", "t2", "t3"])
+        assert c.get(f"/requests/{rid}").json()["output"] == report
+
+
+def test_missing_artifact_is_reported_not_a_500(redis_url, r, tmp_path):
+    with client(redis_url, artifacts_dir=tmp_path) as c:
+        rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]
+        r.set(result_key(rid, "t3"), json.dumps({"artifact": f"{rid}/t3.1.json", "bytes": 5}))
+        finish(r, rid, ["t3"])
+        resp = c.get(f"/requests/{rid}")
+    assert resp.status_code == 200 and "cannot read artifact" in resp.json()["output"]["error"]
+
+
+def test_include_outputs_and_usage(redis_url, r):
+    with client(redis_url) as c:
+        rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]
+        for t in ("t1", "t2"):
+            r.set(result_key(rid, t), json.dumps({"content": f"out {t}", "key_points": []}))
+        r.hset(keys.request_key(rid), mapping={"status": "RUNNING", "sink": "t3",
+               "task:t1": json.dumps({"state": "COMPLETED", "attempt": 1}),
+               "task:t2": json.dumps({"state": "COMPLETED", "attempt": 2})})
+        r.hset(keys.usage_key(rid), mapping={"tokens_in": 300, "tokens_out": 50, "llm_calls": 3,
+                                             "t1:tokens_in": 100, "t1:tokens_out": 20, "t1:llm_calls": 1})
+        plain = c.get(f"/requests/{rid}").json()
+        full = c.get(f"/requests/{rid}?include_outputs=true").json()
+    assert "outputs" not in plain and plain["output"] is None
+    assert full["outputs"] == {"t1": {"content": "out t1", "key_points": []}, "t2": {"content": "out t2", "key_points": []}}
+    assert full["usage"] == {"tokens_in": 300, "tokens_out": 50, "llm_calls": 3,
+                             "by_task": {"t1": {"tokens_in": 100, "tokens_out": 20, "llm_calls": 1}}}
+
+
+def test_report_is_409_until_success_then_markdown(redis_url, r):
+    with client(redis_url) as c:
+        rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]
+        assert c.get(f"/requests/{rid}/report").status_code == 409
+        r.set(result_key(rid, "t3"), json.dumps({"content": "Apple and NVIDIA compared.", "key_points": ["NVIDIA grew faster"]}))
+        finish(r, rid, ["t1", "t2", "t3"])
+        resp = c.get(f"/requests/{rid}/report")
+        assert c.get("/requests/req_nope/report").status_code == 404
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/markdown")
+    assert resp.text.startswith("# A -> B -> C") and "Apple and NVIDIA compared." in resp.text
+    assert "- NVIDIA grew faster" in resp.text
+
+
+def test_several_final_tasks_are_all_returned(redis_url, r):
+    with client(redis_url) as c:
+        rid = c.post("/plans", json=load_fixture_plan("two_components")).json()["request_id"]
+        r.set(result_key(rid, "t2"), json.dumps({"content": "B done", "key_points": []}))
+        r.set(result_key(rid, "t4"), json.dumps({"content": "D done", "key_points": []}))
+        finish(r, rid, ["t1", "t2", "t3", "t4"], sink="")
+        body = c.get(f"/requests/{rid}").json()
+        report = c.get(f"/requests/{rid}/report").text
+    assert body["output"] == {"t2": {"content": "B done", "key_points": []}, "t4": {"content": "D done", "key_points": []}}
+    assert "## Task t2\n\nB done" in report and "## Task t4\n\nD done" in report  # one section per final task, by title
+
+
+def test_api_survives_a_redis_restart():
+    """Regression (Day 4 gate run): a request after Redis restarted used a stale pooled
+    connection and returned 500. Uses its own redis-server so it can restart it."""
+    import shutil
+    import socket
+    import subprocess
+    import time
+
+    exe = shutil.which("redis-server")
+    if not exe:
+        pytest.skip("needs redis-server")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    def start():
+        proc = subprocess.Popen([exe, "--port", str(port), "--save", "", "--appendonly", "no"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            try:
+                redis.Redis(port=port).ping()
+                return proc
+            except redis.ConnectionError:
+                time.sleep(0.05)
+        raise RuntimeError("redis-server did not start")
+
+    proc = start()
+    try:
+        with client(f"redis://127.0.0.1:{port}/0") as c:
+            assert c.post("/plans", json=load_fixture_plan("chain")).status_code == 202
+            proc.terminate()
+            proc.wait()
+            proc = start()
+            assert c.post("/plans", json=load_fixture_plan("chain")).status_code == 202
+    finally:
+        proc.terminate()
+        proc.wait()

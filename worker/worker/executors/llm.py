@@ -1,4 +1,4 @@
-"""LLM executor: one Groq chat completion per attempt (design doc 8.9, D27).
+"""LLM executors: one Groq chat completion per attempt (design doc 8.9, D27, D35).
 
 Moved here from planner/planner/executors.py when worker/ became the single worker.
 The behaviour is the same, but the call is async (AsyncGroq) so a slow model call
@@ -9,6 +9,9 @@ does not block the worker's loop, its other attempts or its heartbeat.
   once it has passed.
 - Dependency results go into the user message in task-number order (t2 < t2.1 < t10).
 - Research answers come from model knowledge (D15).
+- One executor per task type, each with its own prompt (common rules + the type's
+  section, prompts/). Every type except expand answers in Groq strict JSON mode as
+  {content, key_points}, which becomes the committed result (D35).
 - Expand tasks use a Groq strict-mode subplan schema; the answer is then checked by
   validate_subplan, the same rule set as any subplan (8.11).
 """
@@ -29,8 +32,24 @@ from .base import ExecutionContext, ExecutionResult, Executor, PermanentError, R
 
 DEFAULT_EXECUTOR_MODEL = "openai/gpt-oss-120b"
 EXECUTOR_MODEL_ENV = "ATS_EXECUTOR_MODEL"
+# gpt-oss models are reasoning models; "low" uses few reasoning tokens, which matters on
+# tokens-per-minute rate limits (Groq: low | medium | high, gpt-oss only). "" sends nothing.
+EXECUTOR_REASONING_ENV = "ATS_EXECUTOR_REASONING"
+DEFAULT_EXECUTOR_REASONING = "low"
 
 _NULLABLE_NUMBER = {"type": ["number", "null"]}
+
+# Output of every type except expand (design doc 8.9; `sources` is left out because research
+# answers from model knowledge only, D15, and invented sources would be worse than none).
+LLM_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string"},
+        "key_points": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["content", "key_points"],
+    "additionalProperties": False,
+}
 
 # Groq strict mode: every property required, additionalProperties false, optionals nullable.
 # validate_subplan enforces the real Subplan rules afterwards (same approach as D18).
@@ -77,8 +96,16 @@ def normalize_subplan(raw: Any) -> Any:
     return raw
 
 
-def load_executor_prompt() -> str:
-    return resources.files("worker").joinpath("prompts/executor_system.md").read_text()
+def _prompt(name: str) -> str:
+    return resources.files("worker").joinpath(f"prompts/{name}.md").read_text().strip()
+
+
+def load_executor_prompt(task_type: TaskType) -> str:
+    """System prompt for one task type: common rules, the type's section, the output format."""
+    parts = [_prompt("common"), _prompt(task_type.value)]
+    if task_type != TaskType.expand:
+        parts.append(_prompt("output"))
+    return "\n\n".join(parts)
 
 
 def input_text(value: Any) -> str:
@@ -126,17 +153,37 @@ def classify_provider_error(exc: Exception) -> RetryableError | PermanentError:
     return PermanentError(text)
 
 
+def make_client() -> Any:
+    from groq import AsyncGroq  # needs GROQ_API_KEY
+
+    return AsyncGroq(max_retries=0)  # retries belong to atsd, not the SDK (8.6, D12)
+
+
+def parse_output(content: str) -> dict[str, Any]:
+    """The model's {content, key_points} answer, checked. Malformed output is retryable (8.6)."""
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RetryableError(f"output is not valid JSON ({exc.msg})") from exc
+    text = value.get("content") if isinstance(value, dict) else None
+    points = value.get("key_points") if isinstance(value, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise RetryableError("output has no content")
+    if not isinstance(points, list) or not all(isinstance(p, str) for p in points):
+        raise RetryableError("output key_points is not a list of strings")
+    return {"content": text.strip(), "key_points": [p.strip() for p in points if p.strip()]}
+
+
 class LLMExecutor(Executor):
     capability = "llm"
 
-    def __init__(self, model: str | None = None, client: Any = None, clock=time.time):
+    def __init__(self, task_type: TaskType, model: str | None = None, client: Any = None, clock=time.time):
+        self.task_type = TaskType(task_type)
         self.model = model or os.environ.get(EXECUTOR_MODEL_ENV, DEFAULT_EXECUTOR_MODEL)
-        if client is None:
-            from groq import AsyncGroq  # needs GROQ_API_KEY
-
-            client = AsyncGroq(max_retries=0)  # retries belong to atsd, not the SDK (8.6, D12)
-        self.client = client
-        self.system_prompt = load_executor_prompt()
+        reasoning = os.environ.get(EXECUTOR_REASONING_ENV, DEFAULT_EXECUTOR_REASONING)
+        self.reasoning_effort = reasoning if reasoning and "gpt-oss" in self.model else None
+        self.client = client if client is not None else make_client()
+        self.system_prompt = load_executor_prompt(self.task_type)
         self._clock = clock
 
     async def run(self, ctx: ExecutionContext) -> ExecutionResult:
@@ -153,11 +200,16 @@ class LLMExecutor(Executor):
             ],
             "timeout": remaining_s,
         }
-        if msg.type == TaskType.expand:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "subplan", "strict": True, "schema": LLM_SUBPLAN_SCHEMA},
-            }
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if msg.type != self.task_type:
+            raise PermanentError(f"{self.task_type.value} executor got a {msg.type.value} task")
+        expand = msg.type == TaskType.expand
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "subplan" if expand else "task_output", "strict": True,
+                            "schema": LLM_SUBPLAN_SCHEMA if expand else LLM_OUTPUT_SCHEMA},
+        }
 
         try:
             response = await self.client.chat.completions.create(**kwargs)
@@ -171,8 +223,8 @@ class LLMExecutor(Executor):
         if not content:
             raise RetryableError("model returned an empty answer")
 
-        if msg.type != TaskType.expand:
-            return ExecutionResult(output={"content": content}, tokens_in=tokens_in, tokens_out=tokens_out)
+        if not expand:
+            return ExecutionResult(output=parse_output(content), tokens_in=tokens_in, tokens_out=tokens_out)
 
         try:
             raw = normalize_subplan(json.loads(content))

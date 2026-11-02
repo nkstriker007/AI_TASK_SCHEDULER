@@ -310,3 +310,102 @@ async def test_sim_expand_commits_a_subplan(r):
     done = (await events(r))[-1]
     assert done.result_kind == "subplan"
     assert [t["id"] for t in json.loads(await r.get(result_key(RID, "t2")))["tasks"]] == ["s1", "s2"]
+
+
+# --- Day 4: artifact spill and token accounting -------------------------------------
+
+
+class Fixed(Executor):
+    """Returns a fixed output (and token counts), recording the inputs it was given."""
+    capability = "sim"
+
+    def __init__(self, output, tokens=(None, None)):
+        self.output, self.tokens, self.seen = output, tokens, []
+
+    async def run(self, ctx):
+        self.seen.append(ctx.inputs)
+        return ExecutionResult(output=self.output, tokens_in=self.tokens[0], tokens_out=self.tokens[1])
+
+
+def run_body(redis_url, body):
+    async def main():
+        r = Redis.from_url(redis_url, decode_responses=True)
+        try:
+            await body(r)
+        finally:
+            await r.aclose()
+    asyncio.run(main())
+
+
+def test_large_result_spills_to_an_artifact_and_inputs_resolve(redis_url, tmp_path):
+    big = {"content": "x" * 70_000, "key_points": ["long"]}
+
+    async def body(r):
+        ex = Fixed(big)
+        registry = ExecutorRegistry()
+        registry.register(ex)
+        cfg = config(artifacts_dir=tmp_path)
+        await enqueue(r, msg("t1"))
+        await enqueue(r, msg("t2", inputs=("t1",)))
+        await run_until(r, 2, cfg, registry)
+
+        pointer = json.loads(await r.get(result_key(RID, "t1")))
+        assert pointer == {"artifact": f"{RID}/t1.1.json", "bytes": pointer["bytes"]} and pointer["bytes"] > 65_536
+        assert json.loads((tmp_path / RID / "t1.1.json").read_text()) == big
+        assert ex.seen[1] == {"t1": big}  # the dependent task got the content, not the pointer
+
+    run_body(redis_url, body)
+
+
+def test_losing_attempt_removes_its_artifact(redis_url, tmp_path):
+    async def body(r):
+        class LosesRace(Executor):
+            capability = "sim"
+
+            async def run(self, ctx):
+                await r.set(result_key(RID, "t1"), json.dumps({"content": "winner"}))
+                return ExecutionResult(output={"content": "y" * 70_000})
+
+        registry = ExecutorRegistry()
+        registry.register(LosesRace())
+        await enqueue(r, msg(attempt=2))
+        await run_until(r, 1, config(artifacts_dir=tmp_path), registry)
+        assert (await events(r))[-1].committed is False
+        assert not (tmp_path / RID / "t1.2.json").exists()
+
+    run_body(redis_url, body)
+
+
+def test_artifact_pointer_outside_the_directory_is_refused(redis_url, tmp_path):
+    async def body(r):
+        await r.set(result_key(RID, "t1"), json.dumps({"artifact": "../../etc/passwd", "bytes": 10}))
+        await enqueue(r, msg("t2", inputs=("t1",)))
+        await run_until(r, 1, config(artifacts_dir=tmp_path))
+        failed = (await events(r))[-1]
+        assert failed.error_class == "permanent" and "artifact" in failed.message
+
+    run_body(redis_url, body)
+
+
+def test_token_usage_is_summed_per_request_and_task(redis_url):
+    async def body(r):
+        registry = ExecutorRegistry()
+        registry.register(Fixed({"content": "ok"}, tokens=(100, 20)))
+        await enqueue(r, msg("t1"))
+        await enqueue(r, msg("t2"))
+        await enqueue(r, msg("t2", attempt=2))  # a second attempt costs tokens too (but does not run: result exists)
+        await run_until(r, 3, config(), registry)
+        usage = await r.hgetall(keys.usage_key(RID))
+        assert (usage["tokens_in"], usage["tokens_out"], usage["llm_calls"]) == ("200", "40", "2")
+        assert (usage["t1:tokens_in"], usage["t2:llm_calls"]) == ("100", "1")
+
+    run_body(redis_url, body)
+
+
+def test_sim_tasks_record_no_usage(redis_url):
+    async def body(r):
+        await enqueue(r, msg())
+        await run_until(r, 1, config())
+        assert await r.exists(keys.usage_key(RID)) == 0
+
+    run_body(redis_url, body)

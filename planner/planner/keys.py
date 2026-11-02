@@ -38,3 +38,11 @@ def plan_key(request_id: str) -> str:
 def worker_key(worker_id: str) -> str:
     """Hash written by each worker every few seconds, with a short TTL (liveness only)."""
     return f"worker:{worker_id}"
+
+
+def usage_key(request_id: str) -> str:
+    """Hash written by workers: LLM token usage for a request, summed over every attempt that
+    got an answer from the model, including attempts whose result lost the SET NX race (they
+    cost tokens too). Fields: tokens_in, tokens_out, llm_calls, and the same three per task as
+    "<task_id>:tokens_in" etc. Read by the API."""
+    return f"usage:{request_id}"

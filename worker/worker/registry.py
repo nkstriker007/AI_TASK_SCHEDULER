@@ -47,5 +47,9 @@ def default_registry(sim_time_scale: float = 1.0, sim_default_seconds: float = 1
     if "sim" in caps:
         registry.register(SimExecutor(time_scale=sim_time_scale, default_seconds=sim_default_seconds))
     if "llm" in caps:
-        registry.register(LLMExecutor())
+        from .executors.llm import make_client
+
+        client = make_client()  # one Groq client shared by the per-type executors
+        for task_type in ALL_TYPES:
+            registry.register(LLMExecutor(task_type, client=client), types=[task_type])
     return registry

@@ -7,6 +7,9 @@
 #
 # SIM_TIME_SCALE shrinks every sim task's duration (0.1 runs a 65 s plan in 6.5 s), e.g.
 #   SIM_TIME_SCALE=0.1 docker compose up -d
+# Real Groq tasks instead of sim (needs GROQ_API_KEY in .env):
+#   ATSD_CAPABILITY=llm WORKER_CAPABILITIES=llm docker compose up -d      (or: make up-llm)
+# Results over 64 KB are spilled to ./artifacts, shared by the workers and the API.
 # atsd writes its event log to ./runs/<run_id>/events.jsonl.
 #
 # minisched (profile) is the Python stand-in used before atsd existed. It consumes requests:new
@@ -33,7 +36,9 @@ services:
       dockerfile: scheduler/Dockerfile
     environment:
       REDIS_URL: redis://redis:6379/0
-      ATSD_CAPABILITY: ${ATSD_CAPABILITY:-sim}   # the workers below serve tasks:sim
+      ATSD_CAPABILITY: ${ATSD_CAPABILITY:-sim}   # must match the workers' WORKER_CAPABILITIES
+      ATSD_LLM_MAX_INFLIGHT: ${ATSD_LLM_MAX_INFLIGHT:-8}
+      ATSD_MAX_ATTEMPTS: ${ATSD_MAX_ATTEMPTS:-3}
       ATSD_POLICY: ${ATSD_POLICY:-fifo}
       ATSD_SIM_TIMEOUT_MS: ${ATSD_SIM_TIMEOUT_MS:-300000}
       ATSD_RUNS_DIR: /runs
@@ -51,6 +56,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       ATS_PLANNER: ${ATS_PLANNER:-groq}
+      ATS_ARTIFACTS_DIR: /artifacts
+    volumes:
+      - ./artifacts:/artifacts
     env_file:
       - path: .env          # GROQ_API_KEY, ATS_PLANNER_MODEL
         required: false
@@ -67,9 +75,15 @@ services:
       dockerfile: worker/Dockerfile
     environment:
       REDIS_URL: redis://redis:6379/0
-      WORKER_CAPABILITIES: sim
-      WORKER_CONCURRENCY: "1"
+      WORKER_CAPABILITIES: ${WORKER_CAPABILITIES:-sim}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
       SIM_TIME_SCALE: ${SIM_TIME_SCALE:-1}
+      ATS_ARTIFACTS_DIR: /artifacts
+    env_file:
+      - path: .env          # GROQ_API_KEY, ATS_EXECUTOR_MODEL (llm workers only)
+        required: false
+    volumes:
+      - ./artifacts:/artifacts
     deploy:
       replicas: 3
     stop_grace_period: 2m   # let in-flight attempts finish on SIGTERM

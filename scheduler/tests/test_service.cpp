@@ -348,3 +348,26 @@ TEST(Service, EventLogHasOneJsonLinePerTransition) {
   for (std::string line; std::getline(lines, line);) events.push_back(json::parse(line)["event"]);
   EXPECT_THAT(events, ::testing::ElementsAre("request_accepted", "dispatched", "completed", "dispatched"));
 }
+
+TEST(Service, RetryAfterPausesTheWholeCapability) {
+  Fixture f;
+  f.submit(planFile({task("t1"), task("t2"), task("t3"), task("t4", {"t1"})}));
+  ASSERT_EQ(f.dispatched().size(), 3u);
+  f.failed("req_test", "t2", 1, "retryable", 5'000);  // "try again in 5 s": a shared provider limit
+  f.completed("req_test", "t1", 1);                   // t4 becomes ready...
+  EXPECT_EQ(f.dispatched().size(), 3u);               // ...but nothing is dispatched while paused
+  f.advance(4'999);
+  EXPECT_EQ(f.dispatched().size(), 3u);
+  f.advance(1);
+  // FIFO: t4 has been ready since t1 finished; t2 re-enters the ready set when its retry is due.
+  EXPECT_EQ(f.dispatched(), (std::vector<std::string>{"req_test:t1:1", "req_test:t2:1", "req_test:t3:1",
+                                                      "req_test:t4:1", "req_test:t2:2"}));
+}
+
+TEST(Service, FailureWithoutRetryAfterDoesNotPause) {
+  Fixture f;
+  f.submit(planFile({task("t1"), task("t2"), task("t3", {"t1"})}));
+  f.failed("req_test", "t2", 1, "retryable");
+  f.completed("req_test", "t1", 1);
+  EXPECT_EQ(f.dispatched().back(), "req_test:t3:1");  // dispatched straight away
+}

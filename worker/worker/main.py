@@ -23,12 +23,14 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from planner import keys
+from planner.artifacts import artifacts_root
 from planner.schema import TaskType
 from planner.messages import (
     ATTEMPT_ID_PATTERN,
@@ -42,7 +44,7 @@ from planner.messages import (
 
 from .executors import ExecutionContext, PermanentError, RetryableError
 from .registry import ExecutorRegistry, default_registry
-from .results import commit_result, load_inputs
+from .results import commit_result, load_inputs, record_usage
 
 log = logging.getLogger("worker")
 
@@ -64,6 +66,7 @@ class WorkerConfig:
     heartbeat_ttl_s: int = 10
     sim_time_scale: float = 1.0
     sim_default_seconds: float = 10.0
+    artifacts_dir: Path = field(default_factory=artifacts_root)  # ATS_ARTIFACTS_DIR, shared with the API
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> WorkerConfig:
@@ -77,6 +80,7 @@ class WorkerConfig:
         cfg.concurrency = int(env.get("WORKER_CONCURRENCY", cfg.concurrency))
         cfg.sim_time_scale = float(env.get("SIM_TIME_SCALE", cfg.sim_time_scale))
         cfg.sim_default_seconds = float(env.get("SIM_DEFAULT_SECONDS", cfg.sim_default_seconds))
+        cfg.artifacts_dir = artifacts_root(env)
         if cfg.concurrency < 1:
             raise ValueError("WORKER_CONCURRENCY must be >= 1")
         if not cfg.capabilities:
@@ -179,9 +183,11 @@ class Worker:
                 # An earlier attempt already committed: report it without running again (D24).
                 raise _AlreadyCommitted
             executor = self.registry.get(self.streams[stream], message.type)
-            inputs = await load_inputs(self.redis, message)
+            inputs = await load_inputs(self.redis, message, self.config.artifacts_dir)
             result = await executor.run(ExecutionContext(message=message, inputs=inputs))
-            committed = await commit_result(self.redis, key, result.output)
+            await record_usage(self.redis, message, result.tokens_in, result.tokens_out)
+            committed = await commit_result(self.redis, key, result.output, message=message,
+                                            artifacts_root=self.config.artifacts_dir)
             event = TaskCompleted(
                 event="task_completed",
                 **self._base(message),

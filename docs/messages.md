@@ -31,10 +31,11 @@ The value at a result key is always JSON (design doc 8.9):
 
 | Task | Value | Example |
 |---|---|---|
-| any type except `expand` | an object with at least a `content` string; executors may add fields such as `key_points` or `sources` | `{"content": "Apple's revenue grew 8%…", "key_points": ["…"]}` |
+| any type except `expand` | an object with at least a `content` string. The LLM executors write `{content, key_points}` (D35); the sim executor adds `inputs` and `simulated_seconds` | `{"content": "Apple's revenue grew 8%…", "key_points": ["…"]}` |
 | `expand` (`result_kind: "subplan"`) | the Subplan itself (contract #1) | `{"tasks": [{"id": "s1", "type": "research", …}]}` |
+| any result whose JSON is over 64 KB | an **artifact pointer**: the JSON is written to `<ATS_ARTIFACTS_DIR>/<request_id>/<task_id>.<attempt>.json` (a volume shared by workers and the API) and the key holds `{"artifact": "<request_id>/<task_id>.<attempt>.json", "bytes": <size>}` (D36) | `{"artifact": "req_2f9c1a7e/t6.1.json", "bytes": 81234}` |
 
-Helpers in `planner/planner/messages.py`: `encode_output(content, **extra)` builds the stored value, and `result_text(value)` turns a stored value back into text for a downstream prompt (`content` for an output, compact JSON for a Subplan). Readers tolerate a non-JSON value, from before this rule, by treating it as plain text; writers must always store JSON.
+Helpers in `planner/planner/messages.py`: `encode_output(content, **extra)` builds the stored value, and `result_text(value)` turns a stored value back into text for a downstream prompt (`content` for an output, compact JSON for a Subplan). Readers tolerate a non-JSON value, from before this rule, by treating it as plain text; writers must always store JSON. Artifact helpers (`is_pointer`, `read_artifact`, `resolve`) are in `planner/planner/artifacts.py`; workers resolve pointers before passing inputs to an executor, and the API resolves them before returning output.
 
 ## TaskMessage (one dispatched attempt)
 
@@ -79,6 +80,7 @@ The design doc names these keys (8.3) but doesn't define their contents. This fo
 | `requests:new` | stream | API → atsd (group `scheduler`) | One field `data`: the plan file JSON (`{request_id, created_at, plan}`, contract #1), already validated by the API |
 | `plan:<request_id>` | string | API → API | The same plan file JSON, written once (`SET NX`) before the `XADD`, so `GET /requests/{id}` works before atsd has picked the request up. atsd never needs to read it |
 | `request:<request_id>` | hash | atsd → API | Fields below |
+| `usage:<request_id>` | hash | workers → API | LLM token usage (D37): `tokens_in`, `tokens_out`, `llm_calls` for the whole request and the same three per task as `<task_id>:tokens_in`, …, added with `HINCRBY` after every model answer, including attempts that lose the `SET NX` race |
 
 `request:<request_id>` fields, all strings:
 

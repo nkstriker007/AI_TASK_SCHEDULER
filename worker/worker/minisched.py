@@ -33,6 +33,8 @@ from planner.messages import STREAM_FIELD, TaskEvent, TaskMessage, attempt_id, p
 from planner.schema import PlanFile
 from planner.validate import validate_plan_file
 
+from .redis_client import connect
+
 log = logging.getLogger("minisched")
 
 
@@ -208,7 +210,7 @@ async def _run_and_log(redis: Redis, pf: PlanFile, capability: str) -> None:
 
 
 async def _main(args: argparse.Namespace) -> int:
-    redis = Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+    redis = connect(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
     try:
         if args.serve:
             stop = asyncio.Event()
