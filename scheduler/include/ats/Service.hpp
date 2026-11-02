@@ -40,8 +40,13 @@ struct CapabilityConfig {
 };
 
 struct ServiceConfig {
-  std::string consumer = "atsd";
-  std::string policy = "fifo";          // "fifo" | "critical-path"
+  std::string consumer = "atsd";        // keep it stable: a restarted atsd resumes this consumer's requests (D44)
+  // Across requests (D41):
+  //   "fair-share"     the request with the fewest attempts in flight goes next (then the one served
+  //                    least recently, then arrival); critical path within the request. Default.
+  //   "critical-path"  the ready task with the largest bottom level, whichever request it is in
+  //   "fifo"           the task that became ready first, whichever request it is in (baseline)
+  std::string policy = "fair-share";
   int maxAttempts = 3;
   double defaultSeconds = 10.0;         // duration estimate without a hint (critical-path priorities)
   std::string defaultCapability = "llm";
@@ -71,6 +76,7 @@ class Service {
 
   struct Stats {
     std::size_t ingested = 0, rejected = 0, succeeded = 0, failed = 0;
+    std::size_t resumed = 0, restoredTasks = 0;  // requests picked up again after a restart (D44)
     std::size_t dispatched = 0, retries = 0, lostAttempts = 0;
     std::size_t duplicateCompletions = 0, ignoredEvents = 0;
   };
@@ -82,10 +88,21 @@ class Service {
   Service& operator=(const Service&) = delete;
 
   void setup();                                  // consumer groups on requests:new and task:events
+  // Re-ingests the requests:new entries this consumer read but never acknowledged: requests a
+  // previous atsd accepted and did not finish (D44). Call once after setup(). Returns how many.
+  std::size_t recoverPending();
   std::size_t pollOnce(int maxBlockMs);          // read both streams, handle, ack, tick
-  void submitPlanFile(std::string_view json);    // one requests:new entry
+  // One requests:new entry. With an entryId, an accepted request keeps that entry pending until
+  // it finishes, and the call returns true: the caller must not acknowledge it (D44).
+  bool submitPlanFile(std::string_view json, const std::string& entryId = "", bool resume = false);
   void handleEvent(std::string_view json);       // one task:events entry
   void tick();                                   // deadlines, due retries, dispatch
+
+  // Clean shutdown (D43): stop taking requests and dispatching; keep handling events so the
+  // attempts in flight can finish. Unfinished requests stay pending for the next atsd.
+  void beginDrain();
+  bool draining() const { return draining_; }
+  std::size_t inFlightTotal() const;
 
   std::optional<std::int64_t> nextTimerMs() const;  // earliest deadline or retry
   std::size_t activeRequests() const { return active_.size(); }
@@ -100,7 +117,8 @@ class Service {
   const CapabilityConfig& capabilityConfig(const std::string& capability) const;
   std::string capabilityFor(TaskType type) const;
   bool hasRoom(const std::string& capability) const;
-  bool canDispatch(const RequestRun& req) const;
+  std::optional<NodeId> eligibleHead(RequestRun& req);
+  bool before(const RequestRun& a, NodeId ha, const RequestRun& b, NodeId hb) const;
   void dispatchAll();
   void dispatch(RequestRun& req, const Dispatch& d);
   void expireDeadlines();
@@ -130,7 +148,13 @@ class Service {
   std::map<std::string, std::size_t> inFlight_;
   std::map<std::string, std::int64_t> pausedUntil_;  // capability -> no dispatch before this time (provider throttling)
   std::uint64_t serveCounter_ = 0;  // dispatch sequence, for least-recently-served order
+  std::uint64_t arrivalCounter_ = 0;
+  std::shared_ptr<std::uint64_t> readyTickets_ = std::make_shared<std::uint64_t>(0);  // shared by every Scheduler
+  bool draining_ = false;
   Stats stats_;
 };
+
+// Names accepted by ServiceConfig::policy.
+std::vector<std::string> servicePolicyNames();
 
 }  // namespace ats

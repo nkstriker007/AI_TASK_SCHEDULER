@@ -22,7 +22,12 @@ class SchedulingPolicy {
   virtual std::string_view name() const = 0;
   virtual void push(NodeId n) = 0;
   virtual std::optional<NodeId> pop() = 0;
+  // The task pop() would return next, without removing it (atsd compares heads across requests).
+  virtual std::optional<NodeId> peek() const = 0;
   virtual std::size_t size() const = 0;
+  // Larger runs earlier. Comparable across requests for policies that define it (critical path:
+  // bottom level in seconds); 0 for policies without a priority.
+  virtual double priority(NodeId) const { return 0.0; }
   bool empty() const { return size() == 0; }
 };
 
@@ -32,6 +37,7 @@ class FifoPolicy final : public SchedulingPolicy {
   std::string_view name() const override { return "fifo"; }
   void push(NodeId n) override { queue_.push_back(n); }
   std::optional<NodeId> pop() override;
+  std::optional<NodeId> peek() const override;
   std::size_t size() const override { return queue_.size(); }
 
  private:
@@ -49,8 +55,9 @@ class CriticalPathPolicy final : public SchedulingPolicy {
   std::string_view name() const override { return "critical-path"; }
   void push(NodeId n) override;
   std::optional<NodeId> pop() override;
+  std::optional<NodeId> peek() const override;
   std::size_t size() const override { return heap_.size(); }
-  double priority(NodeId n) const { return bottom_.at(n); }
+  double priority(NodeId n) const override { return bottom_.at(n); }
 
  private:
   struct Before {

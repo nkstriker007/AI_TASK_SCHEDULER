@@ -5,20 +5,39 @@
 
 namespace ats {
 
-Scheduler::Scheduler(const Dag& dag, std::unique_ptr<SchedulingPolicy> policy)
-    : dag_(&dag), state_(dag), policy_(std::move(policy)) {
+Scheduler::Scheduler(const Dag& dag, std::unique_ptr<SchedulingPolicy> policy,
+                     std::shared_ptr<std::uint64_t> tickets)
+    : dag_(&dag), state_(dag), policy_(std::move(policy)),
+      counter_(tickets ? std::move(tickets) : std::make_shared<std::uint64_t>(0)), tickets_(dag.size(), 0) {
   if (!policy_) throw std::invalid_argument("Scheduler needs a policy");
 }
 
+void Scheduler::push(NodeId n) {
+  tickets_.at(n) = ++*counter_;
+  policy_->push(n);
+}
+
+bool Scheduler::dispatchable(NodeId n) const {
+  const TaskState s = state_.state(n);
+  return s == TaskState::Ready || s == TaskState::Retrying;
+}
+
 void Scheduler::start() {
-  for (NodeId n : state_.start()) policy_->push(n);
+  for (NodeId n : state_.start()) push(n);
+}
+
+std::optional<NodeId> Scheduler::peekNext() {
+  while (auto n = policy_->peek()) {
+    if (dispatchable(*n)) return n;
+    policy_->pop();  // stale: drop it so the next head can be seen
+  }
+  return std::nullopt;
 }
 
 std::optional<Dispatch> Scheduler::dispatchNext() {
   while (auto n = policy_->pop()) {
     // Defensive: anything not dispatchable any more (e.g. cancelled) is dropped from the ready set.
-    const TaskState s = state_.state(*n);
-    if (s != TaskState::Ready && s != TaskState::Retrying) continue;
+    if (!dispatchable(*n)) continue;
     const int attempt = state_.onDispatched(*n);
     ++inFlight_;
     return Dispatch{*n, attempt};
@@ -36,14 +55,14 @@ void Scheduler::leaveFlight(NodeId n) {
 std::vector<NodeId> Scheduler::complete(NodeId n) {
   std::vector<NodeId> ready = state_.onCompleted(n);
   leaveFlight(n);
-  for (NodeId c : ready) policy_->push(c);
+  for (NodeId c : ready) push(c);
   return ready;
 }
 
 void Scheduler::retry(NodeId n) {
   state_.onRetry(n);
   leaveFlight(n);
-  policy_->push(n);
+  push(n);
 }
 
 std::vector<NodeId> Scheduler::fail(NodeId n) {

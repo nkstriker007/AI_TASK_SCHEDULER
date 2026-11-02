@@ -23,6 +23,32 @@ std::string str(const redisReply* r) {
   return std::string(r->str, r->len);
 }
 
+// XREADGROUP reply (RESP2): [[stream, [[id, [field, value, ...]], ...]], ...], or nil.
+std::vector<BusEntry> parseStreams(const redisReply* reply) {
+  std::vector<BusEntry> out;
+  if (!reply || reply->type != REDIS_REPLY_ARRAY) return out;  // nil: BLOCK timed out
+  for (std::size_t s = 0; s < reply->elements; ++s) {
+    const redisReply* streamReply = reply->element[s];
+    if (streamReply->type != REDIS_REPLY_ARRAY || streamReply->elements != 2) continue;
+    const std::string stream = str(streamReply->element[0]);
+    const redisReply* entries = streamReply->element[1];
+    if (entries->type != REDIS_REPLY_ARRAY) continue;
+    for (std::size_t e = 0; e < entries->elements; ++e) {
+      const redisReply* entry = entries->element[e];
+      if (entry->type != REDIS_REPLY_ARRAY || entry->elements != 2) continue;
+      BusEntry be{stream, str(entry->element[0]), ""};
+      const redisReply* fields = entry->element[1];
+      // A pending entry whose stream entry was deleted (XDEL/XTRIM) comes back with nil fields.
+      if (fields->type == REDIS_REPLY_ARRAY) {
+        for (std::size_t f = 0; f + 1 < fields->elements; f += 2)
+          if (str(fields->element[f]) == "data") be.data = str(fields->element[f + 1]);
+      }
+      out.push_back(std::move(be));
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 RedisAddress parseRedisUrl(const std::string& url) {
@@ -96,27 +122,7 @@ std::vector<BusEntry> RedisBus::readGroup(const std::string& group, const std::s
   for (std::size_t i = 0; i < streams.size(); ++i) args.emplace_back(">");
 
   ReplyPtr reply(command(args));
-  std::vector<BusEntry> out;
-  if (reply->type == REDIS_REPLY_NIL) return out;  // BLOCK timed out
-  // RESP2 reply: [[stream, [[id, [field, value, ...]], ...]], ...]
-  for (std::size_t s = 0; s < reply->elements; ++s) {
-    const redisReply* streamReply = reply->element[s];
-    if (streamReply->type != REDIS_REPLY_ARRAY || streamReply->elements != 2) continue;
-    const std::string stream = str(streamReply->element[0]);
-    const redisReply* entries = streamReply->element[1];
-    for (std::size_t e = 0; e < entries->elements; ++e) {
-      const redisReply* entry = entries->element[e];
-      if (entry->type != REDIS_REPLY_ARRAY || entry->elements != 2) continue;
-      BusEntry be{stream, str(entry->element[0]), ""};
-      const redisReply* fields = entry->element[1];
-      if (fields->type == REDIS_REPLY_ARRAY) {
-        for (std::size_t f = 0; f + 1 < fields->elements; f += 2)
-          if (str(fields->element[f]) == "data") be.data = str(fields->element[f + 1]);
-      }
-      out.push_back(std::move(be));
-    }
-  }
-  return out;
+  return parseStreams(reply.get());
 }
 
 void RedisBus::ack(const std::string& stream, const std::string& group, const std::string& id) {
@@ -136,6 +142,24 @@ void RedisBus::hset(const std::string& key, const std::vector<std::pair<std::str
     args.push_back(v);
   }
   run(command(args));
+}
+
+std::vector<BusEntry> RedisBus::readPending(const std::string& stream, const std::string& group,
+                                            const std::string& consumer, const std::string& afterId, int count) {
+  ReplyPtr reply(command({"XREADGROUP", "GROUP", group, consumer, "COUNT", std::to_string(count), "STREAMS", stream,
+                          afterId}));
+  return parseStreams(reply.get());
+}
+
+std::optional<std::string> RedisBus::hget(const std::string& key, const std::string& field) {
+  ReplyPtr reply(command({"HGET", key, field}));
+  if (reply->type != REDIS_REPLY_STRING) return std::nullopt;
+  return str(reply.get());
+}
+
+bool RedisBus::exists(const std::string& key) {
+  ReplyPtr reply(command({"EXISTS", key}));
+  return reply->type == REDIS_REPLY_INTEGER && reply->integer > 0;
 }
 
 }  // namespace ats

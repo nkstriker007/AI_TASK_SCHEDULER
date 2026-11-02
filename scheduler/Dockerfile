@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libhiredis0.14 
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/atsd /build/ats_sim /build/ats_validate /usr/local/bin/
 WORKDIR /data
-# SIGTERM ends the main loop cleanly (in-flight attempts are not tracked across restarts yet).
+# SIGTERM drains: atsd waits for the attempts in flight, then exits; unfinished requests are
+# resumed by the next atsd (D43, D44).
 STOPSIGNAL SIGTERM
 CMD ["atsd"]

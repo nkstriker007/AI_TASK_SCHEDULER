@@ -22,6 +22,7 @@ using nlohmann::json;
 struct Service::NodeRun {
   std::string capability;
   int attempt = 0;                       // latest dispatched attempt (0 = never dispatched)
+  int attemptBase = 0;                   // attempts made before atsd restarted; numbering continues (D44)
   bool inFlight = false;                 // the latest attempt holds a capability slot and a deadline
   std::int64_t deadlineMs = 0;
   std::optional<std::int64_t> retryAtMs;  // set while waiting out a backoff
@@ -37,6 +38,9 @@ struct Service::RequestRun {
   std::string sink;                      // the single task with no dependents, or ""
   std::string error;                     // first failure, for request:<id>.error
   std::uint64_t lastServed = 0;          // serveCounter_ at its last dispatch; 0 = never
+  std::uint64_t arrival = 0;             // ingest order
+  std::size_t inFlight = 0;              // attempts holding a capability slot (fair share, D41)
+  std::string entryId;                   // requests:new entry, acknowledged when the request finishes (D44)
   bool finished = false;
 };
 
@@ -70,6 +74,10 @@ Service::Service(Bus& bus, ServiceConfig config, Clock now, std::ostream* eventL
     : bus_(bus), config_(std::move(config)), now_(std::move(now)), eventLog_(eventLog), diag_(diagnostics),
       rng_(config_.seed) {
   if (config_.maxAttempts < 1) throw std::invalid_argument("maxAttempts must be >= 1");
+  const auto names = servicePolicyNames();
+  if (std::find(names.begin(), names.end(), config_.policy) == names.end())
+    throw std::invalid_argument("unknown scheduling policy \"" + config_.policy +
+                                "\" (use fair-share, critical-path or fifo)");
   if (!now_) throw std::invalid_argument("Service needs a clock");
 }
 
@@ -80,30 +88,68 @@ void Service::setup() {
   bus_.createGroup(keys::kEventsStream, keys::kSchedulerGroup);
 }
 
+std::size_t Service::recoverPending() {
+  std::size_t resumed = 0;
+  std::string after = "0";
+  while (true) {
+    auto entries = bus_.readPending(keys::kRequestsStream, keys::kSchedulerGroup, config_.consumer, after, 100);
+    if (entries.empty()) break;
+    for (const auto& e : entries) {
+      after = e.id;
+      bool held = false;
+      try {
+        held = submitPlanFile(e.data, e.id, /*resume=*/true);
+      } catch (const std::exception& ex) {
+        diag("error resuming " + e.id + ": " + ex.what());
+      }
+      if (held) ++resumed;
+      else bus_.ack(keys::kRequestsStream, keys::kSchedulerGroup, e.id);
+    }
+  }
+  tick();
+  return resumed;
+}
+
 std::size_t Service::pollOnce(int maxBlockMs) {
   int block = maxBlockMs;
   if (auto next = nextTimerMs()) {
     const std::int64_t wait = *next - now_();
     block = static_cast<int>(std::clamp<std::int64_t>(wait, 0, maxBlockMs));
   }
-  auto entries = bus_.readGroup(keys::kSchedulerGroup, config_.consumer,
-                                {keys::kRequestsStream, keys::kEventsStream}, 100, block);
+  // While draining, new requests stay unread in requests:new for the next atsd (D43).
+  std::vector<std::string> streams{keys::kEventsStream};
+  if (!draining_) streams.insert(streams.begin(), keys::kRequestsStream);
+  auto entries = bus_.readGroup(keys::kSchedulerGroup, config_.consumer, streams, 100, block);
   for (const auto& e : entries) {
+    bool held = false;
     try {
-      if (e.stream == keys::kRequestsStream) submitPlanFile(e.data);
+      if (e.stream == keys::kRequestsStream) held = submitPlanFile(e.data, e.id);
       else handleEvent(e.data);
     } catch (const std::exception& ex) {  // a bad entry or a bug must not stop the service
       diag("error handling " + e.stream + " " + e.id + ": " + ex.what());
     }
-    bus_.ack(e.stream, keys::kSchedulerGroup, e.id);
+    if (!held) bus_.ack(e.stream, keys::kSchedulerGroup, e.id);
   }
   tick();
   return entries.size();
 }
 
+void Service::beginDrain() {
+  if (draining_) return;
+  draining_ = true;
+  diag("draining: no new requests or dispatches; waiting for " + std::to_string(inFlightTotal()) +
+       " attempts in flight");
+}
+
+std::size_t Service::inFlightTotal() const {
+  std::size_t total = 0;
+  for (const auto& [cap, n] : inFlight_) total += n;
+  return total;
+}
+
 // ------------------------------------------------------------------------------- intake
 
-void Service::submitPlanFile(std::string_view text) {
+bool Service::submitPlanFile(std::string_view text, const std::string& entryId, bool resume) {
   std::string requestId;
   try {
     json doc = json::parse(text);
@@ -113,7 +159,7 @@ void Service::submitPlanFile(std::string_view text) {
   }
   if (!requestId.empty() && (active_.count(requestId) || finished_.count(requestId))) {
     diag("duplicate request " + requestId + " ignored");
-    return;
+    return false;
   }
 
   LoadResult loaded = parsePlanFile(text);
@@ -137,19 +183,54 @@ void Service::submitPlanFile(std::string_view text) {
     } else {
       reject(requestId, err.str());
     }
-    return;
+    return false;
   }
   if (requestId.find(':') != std::string::npos) {  // attempt_id must split unambiguously (contract #2)
     reject(requestId, "SCHEMA: request_id must not contain ':'");
-    return;
+    return false;
+  }
+
+  if (resume) {
+    // Finished, but atsd stopped before acknowledging the entry: nothing to run again.
+    const auto status = bus_.hget(keys::requestKey(requestId), "status");
+    if (status && (*status == "SUCCEEDED" || *status == "FAILED" || *status == "REJECTED")) {
+      finished_.insert(requestId);
+      diag("request " + requestId + " already " + *status + "; not resumed");
+      return false;
+    }
   }
 
   auto req = std::make_unique<RequestRun>(std::move(*dag));
   const Dag& g = req->dag;
-  req->sched = std::make_unique<Scheduler>(g, makePolicy(config_.policy, g, estimatedDurations(g, config_.defaultSeconds)));
+  // Within a request: FIFO for the fifo baseline, critical path otherwise (D41).
+  const std::string within = config_.policy == "fifo" ? "fifo" : "critical-path";
+  req->sched = std::make_unique<Scheduler>(g, makePolicy(within, g, estimatedDurations(g, config_.defaultSeconds)),
+                                           readyTickets_);
   req->nodes.resize(g.size());
+  req->entryId = entryId;
+  req->arrival = ++arrivalCounter_;
+  std::size_t restored = 0;
   for (NodeId n = 0; n < g.size(); ++n) {
     req->nodes[n].capability = capabilityFor(g.task(n).type);
+    if (resume) {
+      // D44: a committed result means the task is done; it completes when the policy reaches it,
+      // with no message. Otherwise numbering continues after the attempts already made, so
+      // events from those attempts can never be mistaken for the new ones.
+      NodeRun& nr = req->nodes[n];
+      if (auto prev = bus_.hget(keys::requestKey(requestId), "task:" + g.id(n))) {
+        try {
+          json p = json::parse(*prev);
+          if (p.is_object() && p.contains("attempt") && p["attempt"].is_number_integer())
+            nr.attemptBase = std::max(0, p["attempt"].get<int>());
+        } catch (const json::exception&) {
+        }
+      }
+      nr.attempt = nr.attemptBase;
+      if (bus_.exists(keys::resultKey(requestId, g.id(n)))) {
+        nr.completeOnDispatch = true;
+        ++restored;
+      }
+    }
     if (std::find(req->capabilities.begin(), req->capabilities.end(), req->nodes[n].capability) ==
         req->capabilities.end())
       req->capabilities.push_back(req->nodes[n].capability);
@@ -159,18 +240,27 @@ void Service::submitPlanFile(std::string_view text) {
 
   std::vector<std::pair<std::string, std::string>> fields{
       {"status", "RUNNING"}, {"sink", req->sink}, {"updated_ms", std::to_string(now_())}};
-  for (NodeId n = 0; n < g.size(); ++n) fields.emplace_back("task:" + g.id(n), taskStateJson("WAITING", 0));
+  for (NodeId n = 0; n < g.size(); ++n)
+    fields.emplace_back("task:" + g.id(n), taskStateJson("WAITING", req->nodes[n].attempt));
   bus_.hset(keys::requestKey(requestId), fields);
 
   RequestRun& r = *req;
   active_.emplace(requestId, std::move(req));
   order_.push_back(requestId);
   ++stats_.ingested;
-  log("request_accepted", requestId, "", 0, "", std::to_string(g.size()) + " tasks");
+  if (resume) {
+    ++stats_.resumed;
+    stats_.restoredTasks += restored;
+    log("request_resumed", requestId, "", 0, "",
+        std::to_string(g.size()) + " tasks, " + std::to_string(restored) + " already completed");
+  } else {
+    log("request_accepted", requestId, "", 0, "", std::to_string(g.size()) + " tasks");
+  }
 
   r.sched->start();
   for (NodeId n = 0; n < g.size(); ++n)
     if (r.sched->state().state(n) == TaskState::Ready) writeTask(r, n, "READY");
+  return !entryId.empty();
 }
 
 void Service::reject(const std::string& requestId, const std::string& error) {
@@ -236,9 +326,10 @@ void Service::handleEvent(std::string_view text) {
       log("duplicate_completion", rid, tid, attempt, worker);
     } else if (isTerminal(st)) {
       ++stats_.ignoredEvents;  // FAILED or CANCELLED: the result is unused
-    } else if (st == TaskState::Retrying) {
-      // Already back in the ready set, which the state machine cannot complete from: finish it
-      // the moment the policy dispatches it again, without sending a message.
+    } else if (st == TaskState::Retrying || st == TaskState::Ready) {
+      // Already back in the ready set (RETRYING, or READY after a restart, D44), which the state
+      // machine cannot complete from: finish it the moment the policy dispatches it again,
+      // without sending a message.
       nr.completeOnDispatch = true;
       log("late_result", rid, tid, attempt, worker, "completes on next dispatch");
     } else {  // QUEUED or RUNNING, possibly waiting out a backoff
@@ -341,11 +432,11 @@ void Service::startDueRetries() {
 void Service::scheduleRetry(RequestRun& req, NodeId n, std::optional<std::int64_t> retryAfterMs, const std::string& why) {
   NodeRun& nr = req.nodes[n];
   const std::string& rid = req.dag.requestId();
-  if (nr.attempt >= config_.maxAttempts) {
+  if (nr.attempt - nr.attemptBase >= config_.maxAttempts) {  // a restart starts a fresh budget (D44)
     failNode(req, n, req.dag.id(n) + " failed after " + std::to_string(nr.attempt) + " attempts: " + why);
     return;
   }
-  std::int64_t delay = backoffFor(nr.capability, nr.attempt);
+  std::int64_t delay = backoffFor(nr.capability, nr.attempt - nr.attemptBase);
   if (retryAfterMs) delay = std::max(delay, *retryAfterMs);  // honour the provider's hint (8.6)
   nr.retryAtMs = now_() + delay;
   ++stats_.retries;
@@ -386,31 +477,55 @@ bool Service::hasRoom(const std::string& capability) const {
   return cap == 0 || inFlight(capability) < cap;
 }
 
-// The policy pops the next task without saying its capability first, so a request is only
-// asked for a task while every capability it uses has room. With one capability per request
-// (all-sim or all-llm, as configured today) this is exact; mixed requests are held back
-// conservatively, never over the cap.
-bool Service::canDispatch(const RequestRun& req) const {
-  if (!req.sched->hasReady()) return false;
-  for (const auto& c : req.capabilities)
-    if (!hasRoom(c)) return false;
-  return true;
+// The request's next task, if it could be dispatched now: its own capability has room (D42),
+// or it completes without a message (a late or restored result). Only the head is considered,
+// so a head waiting for its capability holds back the request's other ready tasks.
+std::optional<NodeId> Service::eligibleHead(RequestRun& req) {
+  if (req.finished) return std::nullopt;
+  auto head = req.sched->peekNext();
+  if (!head) return std::nullopt;
+  const NodeRun& nr = req.nodes[*head];
+  if (nr.completeOnDispatch || hasRoom(nr.capability)) return head;
+  return std::nullopt;
+}
+
+// Cross-request order (D41): true if request a's head should be dispatched before b's.
+bool Service::before(const RequestRun& a, NodeId ha, const RequestRun& b, NodeId hb) const {
+  if (config_.policy == "fair-share") {
+    // The request with the smallest share of the capacity right now goes first, so a request
+    // with long tasks cannot hold more than its share of slots once others are waiting.
+    if (a.inFlight != b.inFlight) return a.inFlight < b.inFlight;
+    if (a.lastServed != b.lastServed) return a.lastServed < b.lastServed;
+    return a.arrival < b.arrival;
+  }
+  const std::uint64_t ta = a.sched->readyTicket(ha), tb = b.sched->readyTicket(hb);
+  if (config_.policy == "critical-path") {
+    const double pa = a.sched->policy().priority(ha), pb = b.sched->policy().priority(hb);
+    if (pa != pb) return pa > pb;
+  }
+  return ta < tb;  // tickets are global, so this is "became ready first" across requests
 }
 
 void Service::dispatchAll() {
-  // One task at a time, always from the eligible request served least recently (a new request
-  // first, ties by arrival), so a large request cannot starve a small one while capacity is
-  // short. Within a request the policy decides. (FairShare proper is Day 4.)
+  if (draining_) return;  // D43
+  // One task at a time: every request offers its head, the cross-request policy picks one.
   while (true) {
     RequestRun* next = nullptr;
+    NodeId nextHead = 0;
     for (const auto& id : order_) {
       auto it = active_.find(id);
-      if (it == active_.end() || it->second->finished || !canDispatch(*it->second)) continue;
-      if (!next || it->second->lastServed < next->lastServed) next = it->second.get();
+      if (it == active_.end()) continue;
+      RequestRun& r = *it->second;
+      auto head = eligibleHead(r);
+      if (!head) continue;
+      if (!next || before(r, *head, *next, nextHead)) {
+        next = &r;
+        nextHead = *head;
+      }
     }
     if (!next) break;
-    auto d = next->sched->dispatchNext();
-    if (!d) continue;  // the policy held only stale entries and is now empty, so this request drops out
+    auto d = next->sched->dispatchNext();  // pops exactly the head peeked above
+    if (!d) continue;
     next->lastServed = ++serveCounter_;
     dispatch(*next, *d);
   }
@@ -422,14 +537,14 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
   const std::string& rid = g.requestId();
   const TaskSpec& t = g.task(d.node);
   NodeRun& nr = req.nodes[d.node];
-  nr.attempt = d.attempt;
 
-  if (nr.completeOnDispatch) {  // a late result arrived while this task was RETRYING
+  if (nr.completeOnDispatch) {  // a late result arrived while RETRYING/READY, or a result restored after a restart
     nr.completeOnDispatch = false;
-    completeNode(req, d.node, "", d.attempt - 1);
+    completeNode(req, d.node, "", nr.attempt);
     checkDone(req);
     return;
   }
+  nr.attempt = nr.attemptBase + d.attempt;
 
   const std::int64_t deadline = now_() + capabilityConfig(nr.capability).timeoutMs;
   json inputs = json::object();
@@ -437,8 +552,8 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
   json msg = {
       {"request_id", rid},
       {"task_id", t.id},
-      {"attempt", d.attempt},
-      {"attempt_id", rid + ":" + t.id + ":" + std::to_string(d.attempt)},
+      {"attempt", nr.attempt},
+      {"attempt_id", rid + ":" + t.id + ":" + std::to_string(nr.attempt)},
       {"type", std::string(toString(t.type))},
       {"instruction", t.instruction},
       {"inputs", inputs},
@@ -449,10 +564,11 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
   nr.inFlight = true;
   nr.deadlineMs = deadline;
   ++inFlight_[nr.capability];
+  ++req.inFlight;
   bus_.add(keys::taskStream(nr.capability), msg.dump());
   ++stats_.dispatched;
   writeTask(req, d.node, "QUEUED");
-  log("dispatched", rid, t.id, d.attempt, "", keys::taskStream(nr.capability));
+  log("dispatched", rid, t.id, nr.attempt, "", keys::taskStream(nr.capability));
 }
 
 void Service::releaseSlot(RequestRun& req, NodeId n) {
@@ -461,6 +577,7 @@ void Service::releaseSlot(RequestRun& req, NodeId n) {
   nr.inFlight = false;
   auto& count = inFlight_[nr.capability];
   if (count > 0) --count;
+  if (req.inFlight > 0) --req.inFlight;
 }
 
 // ------------------------------------------------------------------------------- outcomes
@@ -495,6 +612,7 @@ void Service::checkDone(RequestRun& req) {
                                                           {"updated_ms", std::to_string(now_())}};
   if (!ok) fields.emplace_back("error", req.error);
   bus_.hset(keys::requestKey(rid), fields);
+  if (!req.entryId.empty()) bus_.ack(keys::kRequestsStream, keys::kSchedulerGroup, req.entryId);  // D44
   ++(ok ? stats_.succeeded : stats_.failed);
   log(ok ? "request_succeeded" : "request_failed", rid, "", 0, "", req.error);
 }
@@ -535,5 +653,7 @@ void Service::log(const std::string& event, const std::string& request, const st
 void Service::diag(const std::string& message) {
   if (diag_) *diag_ << "atsd: " << message << '\n';
 }
+
+std::vector<std::string> servicePolicyNames() { return {"fair-share", "critical-path", "fifo"}; }
 
 }  // namespace ats

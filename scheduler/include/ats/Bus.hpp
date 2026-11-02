@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +36,19 @@ class Bus {
 
   // HSET <key> f1 v1 f2 v2 ...
   virtual void hset(const std::string& key, const std::vector<std::pair<std::string, std::string>>& fields) = 0;
+
+  // ---- used when atsd restarts and resumes unfinished requests (D44) ----
+
+  // XREADGROUP GROUP <group> <consumer> COUNT <count> STREAMS <stream> <afterId>: entries this
+  // consumer read earlier but has not acknowledged, with ids greater than afterId ("0" = all).
+  virtual std::vector<BusEntry> readPending(const std::string& stream, const std::string& group,
+                                            const std::string& consumer, const std::string& afterId, int count) = 0;
+
+  // HGET <key> <field>; nullopt if the key or field does not exist.
+  virtual std::optional<std::string> hget(const std::string& key, const std::string& field) = 0;
+
+  // EXISTS <key>
+  virtual bool exists(const std::string& key) = 0;
 };
 
 }  // namespace ats

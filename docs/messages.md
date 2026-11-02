@@ -77,7 +77,7 @@ The design doc names these keys (8.3) but doesn't define their contents. This fo
 
 | Key | Type | Writer → reader | Content |
 |---|---|---|---|
-| `requests:new` | stream | API → atsd (group `scheduler`) | One field `data`: the plan file JSON (`{request_id, created_at, plan}`, contract #1), already validated by the API |
+| `requests:new` | stream | API → atsd (group `scheduler`) | One field `data`: the plan file JSON (`{request_id, created_at, plan}`, contract #1), already validated by the API. atsd acknowledges an accepted request's entry only when the request finishes, so a restarted atsd resumes it (D44) |
 | `plan:<request_id>` | string | API → API | The same plan file JSON, written once (`SET NX`) before the `XADD`, so `GET /requests/{id}` works before atsd has picked the request up. atsd never needs to read it |
 | `request:<request_id>` | hash | atsd → API | Fields below |
 | `usage:<request_id>` | hash | workers → API | LLM token usage (D37): `tokens_in`, `tokens_out`, `llm_calls` for the whole request and the same three per task as `<task_id>:tokens_in`, …, added with `HINCRBY` after every model answer, including attempts that lose the `SET NX` race |

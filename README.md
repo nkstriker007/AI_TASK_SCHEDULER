@@ -141,7 +141,7 @@ cd api && uv sync && uv run uvicorn api.app:app --port 8000
 ```
 
 atsd configuration (environment): `REDIS_URL`, `ATSD_CAPABILITY` (send every task to `sim` or `llm`;
-default `llm`), `ATSD_POLICY` (`fifo` | `critical-path`), `ATSD_MAX_ATTEMPTS` (3),
+default `llm`), `ATSD_POLICY` (`fair-share` | `critical-path` | `fifo`, D41), `ATSD_DRAIN_MS` (30000, D43), `ATSD_MAX_ATTEMPTS` (3),
 `ATSD_LLM_MAX_INFLIGHT` (8), `ATSD_SIM_MAX_INFLIGHT` (0 = unlimited), `ATSD_LLM_TIMEOUT_MS` (120000),
 `ATSD_SIM_TIMEOUT_MS` (300000), `ATSD_RUNS_DIR` (`runs`). Workers and the API use `REDIS_URL` too
 (default `redis://localhost:6379/0`); the Groq worker uses `ATS_EXECUTOR_MODEL`. Tests that need Redis
@@ -170,7 +170,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D40)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D44)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -211,7 +211,8 @@ scheduler/                       C++20 runtime (Person B)
   tools/                         ats_validate (parity CLI), ats_sim (simulator CLI), atsd (scheduler service), redis_ping (spike)
   tests/                         GoogleTest: loader, dag, state machine, fixtures, property test (Day 1);
                                  analysis, policies, scheduler, simulator invariants (Day 2); ats_sim CLI tests;
-                                 atsd service with a fake bus and clock (Day 3)
+                                 atsd service with a fake bus and clock (Day 3);
+                                 policies, drain, resume (Day 4); test_redis_integration.cpp against a real Redis (Day 4)
   Dockerfile                     atsd image
 tests/parity.py                  C++ and Python validators vs expected_validation.json (make parity)
 tests/test_parity.py             Python validator vs C++ (ats_sim), schema freshness
@@ -284,7 +285,7 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 - [x] 21 unit tests with a fake bus and a fake clock (design doc 10.3): backoff, `retry_after_ms`, max attempts, permanent failure, independent branch after a failure, deadline expiry, late committed result accepted once, late result during backoff, stale events, in-flight cap, rejection, duplicates, two concurrent requests, garbage events, acks, event log
 - [x] 4 end-to-end tests with the real binary, real Redis and real workers (`worker/tests/test_atsd_e2e.py`), including a worker that dies holding a task: recovered by the deadline, one committed result per task
 - [x] Docker image (`scheduler/Dockerfile`) and `atsd` service in `docker-compose.yml`; CI installs hiredis and builds atsd
-- [ ] Day 4: FairShare + CriticalPath across requests, clean shutdown that keeps in-flight attempts, more integration tests
+- [x] Day 4: see "Day 4 status: Person B"
 - [ ] Day 5: janitor for dead pending entries (8.7)
 
 ## Day 3 gate
@@ -305,7 +306,21 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 
 - [x] **Passed.** Two typed requests submitted through `POST /requests` at the same time, planned by Groq (6 and 4 tasks), executed by Groq workers under atsd (`make up-llm`), both SUCCEEDED in 62 s and 20 s; `GET /requests/{id}/report` returned both reports. Rate-limited tasks recovered on attempts 2 and 3.
 
+## Day 4 status: Person B
+
+- [x] Cross-request policies in atsd (D41), `ATSD_POLICY`: `fair-share` (default: fewest attempts in flight first, critical path within a request), `critical-path` (largest bottom level across all requests), `fifo` (global ready order, the baseline). `SchedulingPolicy::peek()` and `priority()`, `Scheduler::peekNext()` and ready tickets shared across requests
+- [x] A request waits only for its next task's capability, not every capability it uses (D42)
+- [x] Clean shutdown (D43): SIGTERM stops intake and dispatch, waits up to `ATSD_DRAIN_MS` for attempts in flight to report, a second signal stops at once; 40 s `stop_grace_period` in `docker-compose.yml`
+- [x] Restart and crash recovery (D44): a request's `requests:new` entry stays pending until it finishes; a new atsd resumes it, skips tasks whose result is committed, continues attempt numbers
+- [x] 17 new unit tests (policies, peek, tickets, drain, resume); 5 C++ integration tests against a real Redis (`ats_redis_tests`: `RedisBus` round trip, two concurrent requests, crash and resume, drain); 3 new end-to-end tests with the real binary and workers (SIGTERM drain then resume with every task run once, `kill -9` then resume with one committed result per task, fair share vs FIFO under a cap of 2). GCC, Clang `-Werror`, ASan/UBSan clean
+- [ ] Person A: review D41–D44, especially the `requests:new` acknowledgement change in `docs/messages.md`
+
+Policies by hand (a cap makes the difference visible):
+
+```bash
+ATSD_CAPABILITY=sim ATSD_SIM_MAX_INFLIGHT=2 ATSD_POLICY=fifo ./scheduler/build/atsd      # or critical-path, fair-share
+```
+
 Open items:
 
 - [ ] Person B: review atsd (`Service.cpp`, `RedisBus.cpp`, `tools/atsd.cpp`, D32–D34, D39)
-- [ ] Person B, Day 4: FairShare + CriticalPath across requests, clean shutdown that keeps in-flight attempts, integration tests against Redis

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -24,12 +25,21 @@ struct Dispatch {
 //   complete(n)      newly ready children enter the ready set
 //   retry(n)         task goes back into the ready set as RETRYING
 //   fail(n)          task FAILED; returns the descendants that were CANCELLED
+//
+// Every time a task enters the ready set it gets a ticket from `tickets`, a counter that
+// several Schedulers may share (atsd shares one across all requests, so tickets order ready
+// tasks globally: the cross-request FIFO policy, D41). Without one, the Scheduler keeps its own.
 class Scheduler {
  public:
-  Scheduler(const Dag& dag, std::unique_ptr<SchedulingPolicy> policy);
+  Scheduler(const Dag& dag, std::unique_ptr<SchedulingPolicy> policy,
+            std::shared_ptr<std::uint64_t> tickets = nullptr);
 
   void start();
   std::optional<Dispatch> dispatchNext();
+  // The task dispatchNext() would pick, without dispatching it. Drops entries that are no
+  // longer dispatchable (e.g. cancelled), so it is not const.
+  std::optional<NodeId> peekNext();
+  std::uint64_t readyTicket(NodeId n) const { return tickets_.at(n); }
   void started(NodeId n);
   std::vector<NodeId> complete(NodeId n);
   void retry(NodeId n);
@@ -46,11 +56,15 @@ class Scheduler {
 
  private:
   void leaveFlight(NodeId n);
+  void push(NodeId n);
+  bool dispatchable(NodeId n) const;
 
   const Dag* dag_;
   ExecutionState state_;
   std::unique_ptr<SchedulingPolicy> policy_;
   std::size_t inFlight_ = 0;  // QUEUED + RUNNING
+  std::shared_ptr<std::uint64_t> counter_;
+  std::vector<std::uint64_t> tickets_;  // per task: ticket of its latest entry into the ready set
 };
 
 }  // namespace ats
