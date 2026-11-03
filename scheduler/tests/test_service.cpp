@@ -602,3 +602,12 @@ TEST(ServiceResume, InvalidPendingEntryIsRejectedAndAcknowledged) {
   EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "REJECTED");
   EXPECT_EQ(f.bus.acked.size(), 1u);
 }
+
+TEST(Service, LlmBackoffDoublesSoSixAttemptsOutlastAMinute) {
+  ats::ServiceConfig c;  // atsd's defaults
+  const auto& backoff = c.capabilities.at("llm").backoffMs;
+  EXPECT_EQ(backoff, (std::vector<std::int64_t>{2'000, 4'000, 8'000, 16'000, 32'000}));
+  std::int64_t total = 0;
+  for (auto b : backoff) total += b;  // waits before attempts 2..6
+  EXPECT_GT(total, 60'000);
+}

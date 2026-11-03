@@ -43,6 +43,7 @@ from planner.messages import (
 )
 
 from .executors import ExecutionContext, PermanentError, RetryableError
+from .faults import FaultConfig
 from .registry import ExecutorRegistry, default_registry
 from .results import commit_result, load_inputs, record_usage
 
@@ -67,6 +68,7 @@ class WorkerConfig:
     sim_time_scale: float = 1.0
     sim_default_seconds: float = 10.0
     artifacts_dir: Path = field(default_factory=artifacts_root)  # ATS_ARTIFACTS_DIR, shared with the API
+    faults: FaultConfig = field(default_factory=FaultConfig)  # SIM_FAULT_* / SIM_FAULTS (sim executor only)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> WorkerConfig:
@@ -81,6 +83,7 @@ class WorkerConfig:
         cfg.sim_time_scale = float(env.get("SIM_TIME_SCALE", cfg.sim_time_scale))
         cfg.sim_default_seconds = float(env.get("SIM_DEFAULT_SECONDS", cfg.sim_default_seconds))
         cfg.artifacts_dir = artifacts_root(env)
+        cfg.faults = FaultConfig.from_env(env)
         if cfg.concurrency < 1:
             raise ValueError("WORKER_CONCURRENCY must be >= 1")
         if not cfg.capabilities:
@@ -107,7 +110,7 @@ class Worker:
         self.redis = redis
         self.config = config
         self.registry = registry or default_registry(config.sim_time_scale, config.sim_default_seconds,
-                                                     config.capabilities)
+                                                     config.capabilities, config.faults)
         self.clock_ms = clock_ms
         self.streams = {keys.task_stream(c): c for c in config.capabilities}
         self._inflight: set[asyncio.Task] = set()
@@ -184,7 +187,14 @@ class Worker:
                 raise _AlreadyCommitted
             executor = self.registry.get(self.streams[stream], message.type)
             inputs = await load_inputs(self.redis, message, self.config.artifacts_dir)
-            result = await executor.run(ExecutionContext(message=message, inputs=inputs))
+            # Stop at the attempt's deadline: atsd treats the attempt as lost from then on (8.7), so
+            # working on is wasted, and a hung executor must not hold this worker's slot forever.
+            remaining_s = max(0.0, (message.deadline_ms - self.clock_ms()) / 1000)
+            try:
+                result = await asyncio.wait_for(
+                    executor.run(ExecutionContext(message=message, inputs=inputs)), timeout=remaining_s)
+            except TimeoutError:
+                raise RetryableError("attempt passed its deadline before finishing") from None
             await record_usage(self.redis, message, result.tokens_in, result.tokens_out)
             committed = await commit_result(self.redis, key, result.output, message=message,
                                             artifacts_root=self.config.artifacts_dir)
@@ -214,6 +224,12 @@ class Worker:
         await self._emit(event)
         await self.redis.xack(stream, keys.WORKERS_GROUP, entry_id)
         self.processed += 1
+
+    def abort(self) -> None:
+        """Stop at once (a second SIGTERM): cancel the attempts in progress. They send no event
+        and are not acknowledged, so atsd's deadline re-dispatches them (D10)."""
+        for task in list(self._inflight):
+            task.cancel()
 
     def _base(self, message: TaskMessage) -> dict:
         return {"attempt_id": message.attempt_id, "worker_id": self.config.worker_id, "ts_ms": self.clock_ms()}

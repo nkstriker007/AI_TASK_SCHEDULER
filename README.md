@@ -24,6 +24,7 @@ make test                       # C++ tests (ctest) + planner, worker, API and p
 make cpp-test                   # C++ only
 make py-test                    # Python only
 make e2e                        # atsd + workers end to end on a throwaway Redis
+make chaos                      # Docker stack with injected faults; kills worker containers mid-run (needs Docker)
 make parity                     # C++ and Python validators vs examples/expected_validation.json
 make demo                       # request -> plan -> ats_sim (offline fake planner); LIVE=1 for Groq, REQUEST="..." for your own
 ./scheduler/build/ats_validate examples/plans/invalid_cycle.json
@@ -170,7 +171,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D44)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D48)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -195,6 +196,7 @@ worker/                          Python worker (Person A, Day 3)
   worker/registry.py             (capability, task type) -> executor
   worker/results.py              load dependency results, commit once (spilling large results), token usage
   worker/redis_client.py         Redis connection that survives a Redis restart
+  worker/faults.py               fault injection for sim tasks: error, 429, hang, crash, straggler (D46)
   worker/executors/              Executor interface + error classes; sim executor; Groq LLM executor (llm.py)
   worker/prompts/                executor prompts: common rules, one file per task type, output format
   worker/minisched.py            Python stand-in for atsd, for testing only (D26)
@@ -216,6 +218,7 @@ scheduler/                       C++20 runtime (Person B)
   Dockerfile                     atsd image
 tests/parity.py                  C++ and Python validators vs expected_validation.json (make parity)
 tests/test_parity.py             Python validator vs C++ (ats_sim), schema freshness
+scripts/chaos.py                 chaos run against the Docker stack: submit, kill workers, check (make chaos)
 docker-compose.yml               redis, atsd, api, worker (3 replicas), minisched (profile)
 ```
 
@@ -305,6 +308,8 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 ## Day 4 gate
 
 - [x] **Passed.** Two typed requests submitted through `POST /requests` at the same time, planned by Groq (6 and 4 tasks), executed by Groq workers under atsd (`make up-llm`), both SUCCEEDED in 62 s and 20 s; `GET /requests/{id}/report` returned both reports. Rate-limited tasks recovered on attempts 2 and 3.
+- [x] **Re-run after Person B's Day 4 (fair-share policy, drain, resume).** The first re-run failed one request: Groq's `retry-after` hints (2–4 s) were shorter than the full tokens-per-minute window, so 6 attempts were used up in under 40 s. With doubling LLM backoff (2, 4, 8, 16, 32 s, D45) both requests SUCCEEDED (79 s and 7 s), through 10 rate-limited retries (one task needed 5 attempts); the small request finished first under fair share.
+- [x] atsd restarted mid-run in Docker (sim, `company_research`): it drained 2 attempts in flight, the next atsd resumed the request with 3 tasks already completed, and every task ran exactly once.
 
 ## Day 4 status: Person B
 
@@ -313,7 +318,7 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 - [x] Clean shutdown (D43): SIGTERM stops intake and dispatch, waits up to `ATSD_DRAIN_MS` for attempts in flight to report, a second signal stops at once; 40 s `stop_grace_period` in `docker-compose.yml`
 - [x] Restart and crash recovery (D44): a request's `requests:new` entry stays pending until it finishes; a new atsd resumes it, skips tasks whose result is committed, continues attempt numbers
 - [x] 17 new unit tests (policies, peek, tickets, drain, resume); 5 C++ integration tests against a real Redis (`ats_redis_tests`: `RedisBus` round trip, two concurrent requests, crash and resume, drain); 3 new end-to-end tests with the real binary and workers (SIGTERM drain then resume with every task run once, `kill -9` then resume with one committed result per task, fair share vs FIFO under a cap of 2). GCC, Clang `-Werror`, ASan/UBSan clean
-- [ ] Person A: review D41–D44, especially the `requests:new` acknowledgement change in `docs/messages.md`
+- [x] Person A: reviewed D41–D44, including the `requests:new` acknowledgement change: the API only `XADD`s to `requests:new` and never reads or acknowledges it, and minisched uses its own consumer, so nothing on Person A's side changes
 
 Policies by hand (a cap makes the difference visible):
 
@@ -321,6 +326,18 @@ Policies by hand (a cap makes the difference visible):
 ATSD_CAPABILITY=sim ATSD_SIM_MAX_INFLIGHT=2 ATSD_POLICY=fifo ./scheduler/build/atsd      # or critical-path, fair-share
 ```
 
+## Day 5 status: Person A
+
+- [x] Fault injection (`worker/worker/faults.py`, D46): error, simulated 429 with `retry_after_ms`, hang, crash (the worker process exits mid-task), straggler, permanent; by rate or by rule (`SIM_FAULTS="t2@1=crash"`), deterministic per attempt; passed through `docker-compose.yml`
+- [x] Graceful worker shutdown: the first SIGTERM finishes the attempts in progress (Day 3), a second one stops at once; attempts are stopped at their deadline so a hang cannot hold a worker (D47)
+- [x] Error classification: injected and provider errors map to retryable (with `retry_after_ms`) or permanent; atsd pauses the capability on `retry_after_ms` (D39) and backs off 2–32 s (D45)
+- [x] Chaos test (`worker/tests/test_chaos.py`, D48) with the real atsd: 4 requests through 20 % errors, 429s, hangs, stragglers, a crashed and a killed worker; all succeed, exactly one committed result per task, retries and lost attempts in atsd's log (passes 5 runs out of 5)
+- [x] Chaos script (`scripts/chaos.py`, `make chaos`): Docker stack, `docker kill` of worker containers that are running a task, restart, report. Run: 6 requests, 3 workers killed, 20 retries and 4 lost attempts logged, all SUCCEEDED, 0 duplicate commits
+
+## Day 5 gate
+
+- [x] **Passed.** Real Groq run (`make up-llm`, `ATSD_LLM_TIMEOUT_MS=60000`): one typed request, and 4 s in `scripts/chaos.py` killed the worker container that was running t4 (not restarted). atsd's log: t4 attempt 1 `attempt_lost` at its deadline, `retry_scheduled`, attempt 2 on another worker; the request SUCCEEDED in 75 s with 0 duplicate commits and the report was served.
+
 Open items:
 
-- [ ] Person B: review atsd (`Service.cpp`, `RedisBus.cpp`, `tools/atsd.cpp`, D32–D34, D39)
+- [ ] Person B: review the atsd changes made from Person A's side: D39 (capability pause on `retry_after_ms`) and D45 (doubling LLM backoff)

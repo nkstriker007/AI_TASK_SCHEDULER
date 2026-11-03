@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from planner.schema import TaskType
 
 from .executors import Executor, LLMExecutor, PermanentError, SimExecutor
+from .faults import FaultConfig
 
 ALL_TYPES: tuple[TaskType, ...] = tuple(TaskType)
 
@@ -39,13 +40,13 @@ class ExecutorRegistry:
 
 
 def default_registry(sim_time_scale: float = 1.0, sim_default_seconds: float = 10.0,
-                     capabilities: Iterable[str] = ("sim",)) -> ExecutorRegistry:
+                     capabilities: Iterable[str] = ("sim",), faults: FaultConfig | None = None) -> ExecutorRegistry:
     """Executors for the capabilities this worker serves. The Groq client is only created
     for an llm worker, so sim workers never need GROQ_API_KEY."""
     caps = set(capabilities)
     registry = ExecutorRegistry()
     if "sim" in caps:
-        registry.register(SimExecutor(time_scale=sim_time_scale, default_seconds=sim_default_seconds))
+        registry.register(SimExecutor(time_scale=sim_time_scale, default_seconds=sim_default_seconds, faults=faults))
     if "llm" in caps:
         from .executors.llm import make_client
 

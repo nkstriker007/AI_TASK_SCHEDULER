@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo e2e up up-llm down clean redis-deps redis-spike redis-up redis-down
+.PHONY: build test cpp-test py-test parity demo e2e chaos up up-llm down clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -51,6 +51,15 @@ e2e: build
 # Redis + atsd + API + 3 sim workers (worker/) in Docker.
 up:
 	docker compose up -d --build --wait
+
+# Chaos (design doc 10.4, E6): sim stack with injected faults (20% errors, 5% simulated 429s,
+# 5% hangs), short attempt deadlines, then scripts/chaos.py submits plans and kills worker
+# containers while they run. Passes when every request succeeds with zero duplicate commits.
+CHAOS_ENV = SIM_TIME_SCALE=0.2 SIM_FAULT_ERROR_RATE=0.2 SIM_FAULT_RATE_LIMIT_RATE=0.05 SIM_FAULT_HANG_RATE=0.05 \
+	ATSD_SIM_TIMEOUT_MS=15000 ATSD_MAX_ATTEMPTS=8
+chaos:
+	$(CHAOS_ENV) docker compose up -d --build --wait
+	cd worker && uv run python ../scripts/chaos.py --requests 6 --kills 3 --kill-every 4
 
 # Same stack with real Groq tasks: atsd dispatches to tasks:llm, workers run the LLM executors.
 # Defaults fit Groq's on_demand tier (8,000 tokens/minute for gpt-oss-120b): at most 2 calls in

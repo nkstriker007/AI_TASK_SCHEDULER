@@ -52,7 +52,9 @@ struct ServiceConfig {
   std::string defaultCapability = "llm";
   std::map<std::string, std::string> capabilityByType;  // task type name -> capability; else defaultCapability
   std::map<std::string, CapabilityConfig> capabilities{
-      {"llm", CapabilityConfig{8, 120'000, {2'000, 4'000}, 0.2}},
+      // 2 s, 4 s as in design doc 8.6, then doubling: with 6 attempts (make up-llm, D38) the waits add
+      // up to more than a minute, enough to outlast a tokens-per-minute window (D45).
+      {"llm", CapabilityConfig{8, 120'000, {2'000, 4'000, 8'000, 16'000, 32'000}, 0.2}},
       {"sim", CapabilityConfig{0, 300'000, {}, 0.0}},
   };
   std::uint64_t seed = 42;              // backoff jitter

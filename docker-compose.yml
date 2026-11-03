@@ -42,6 +42,7 @@ services:
       ATSD_POLICY: ${ATSD_POLICY:-fair-share}     # fair-share | critical-path | fifo (D41)
       ATSD_DRAIN_MS: ${ATSD_DRAIN_MS:-30000}      # on stop, wait this long for attempts in flight (D43)
       ATSD_SIM_TIMEOUT_MS: ${ATSD_SIM_TIMEOUT_MS:-300000}
+      ATSD_LLM_TIMEOUT_MS: ${ATSD_LLM_TIMEOUT_MS:-120000}
       ATSD_RUNS_DIR: /runs
     volumes:
       - ./runs:/runs
@@ -81,6 +82,14 @@ services:
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
       SIM_TIME_SCALE: ${SIM_TIME_SCALE:-1}
       ATS_ARTIFACTS_DIR: /artifacts
+      # Fault injection for sim tasks (worker/faults.py); empty = off. Used by `make chaos`.
+      SIM_FAULT_ERROR_RATE: ${SIM_FAULT_ERROR_RATE:-}
+      SIM_FAULT_RATE_LIMIT_RATE: ${SIM_FAULT_RATE_LIMIT_RATE:-}
+      SIM_FAULT_HANG_RATE: ${SIM_FAULT_HANG_RATE:-}
+      SIM_FAULT_CRASH_RATE: ${SIM_FAULT_CRASH_RATE:-}
+      SIM_FAULT_STRAGGLER_RATE: ${SIM_FAULT_STRAGGLER_RATE:-}
+      SIM_FAULTS: ${SIM_FAULTS:-}
+      SIM_FAULT_SEED: ${SIM_FAULT_SEED:-0}
     env_file:
       - path: .env          # GROQ_API_KEY, ATS_EXECUTOR_MODEL (llm workers only)
         required: false
