@@ -130,3 +130,79 @@ TEST(Scheduler, SharedTicketsOrderReadyTasksAcrossSchedulers) {
   s1.complete(d->node);  // b becomes ready after x
   EXPECT_GT(s1.readyTicket(node(g1, "t2")), s2.readyTicket(node(g2, "t1")));
 }
+
+// ------------------------------------------------------------------------------------------
+// Dynamic expansion (Day 6, D53)
+
+namespace {
+
+TaskSpec subTask(const std::string& id, std::vector<std::string> deps, double secs) {
+  TaskSpec t;
+  t.id = id;
+  t.type = TaskType::Research;
+  t.title = id;
+  t.instruction = id;
+  t.dependsOn = std::move(deps);
+  t.estimatedSeconds = secs;
+  return t;
+}
+
+}  // namespace
+
+TEST(SchedulerExpand, SubplanRunsBetweenTheExpandTaskAndItsDependents) {
+  Dag g = mustBuild(planFile({task("t1"), task("t2", {}, "expand"), task("t3", {"t1", "t2"}, "compare")}));
+  Scheduler s(g, std::make_unique<FifoPolicy>());
+  s.start();
+  auto a = s.dispatchNext();
+  auto b = s.dispatchNext();
+  ASSERT_EQ(g.id(b->node), "t2");
+  s.complete(a->node);  // t1
+  auto r = g.expand(b->node, {subTask("s1", {}, 1), subTask("s2", {}, 1)});
+  ASSERT_TRUE(r.ok());
+  s.onExpanded(b->node, std::vector<double>(g.size(), 0.0));
+  EXPECT_EQ(s.state().state(node(g, "t3")), TaskState::Waiting);
+  EXPECT_THAT(ids(g, s.complete(b->node)), ElementsAre("t2.1", "t2.2"));
+  auto x = s.dispatchNext();
+  auto y = s.dispatchNext();
+  EXPECT_THAT(s.complete(x->node), IsEmpty());
+  EXPECT_THAT(ids(g, s.complete(y->node)), ElementsAre("t2.join"));
+  auto j = s.dispatchNext();
+  EXPECT_THAT(ids(g, s.complete(j->node)), ElementsAre("t3"));
+  auto t3 = s.dispatchNext();
+  s.complete(t3->node);
+  EXPECT_TRUE(s.isDone());
+  EXPECT_TRUE(s.succeeded());
+}
+
+TEST(SchedulerExpand, AFailedSubtaskCancelsTheJoinAndEverythingAfterIt) {
+  Dag g = mustBuild(planFile({task("t1", {}, "expand"), task("t2", {"t1"}, "report")}));
+  Scheduler s(g, std::make_unique<FifoPolicy>());
+  s.start();
+  auto e = s.dispatchNext();
+  ASSERT_TRUE(g.expand(e->node, {subTask("s1", {}, 1), subTask("s2", {}, 1)}).ok());
+  s.onExpanded(e->node, std::vector<double>(g.size(), 0.0));
+  s.complete(e->node);
+  auto x = s.dispatchNext();
+  s.dispatchNext();
+  EXPECT_THAT(ids(g, s.fail(x->node)), ElementsAre("t1.join", "t2"));
+}
+
+TEST(SchedulerExpand, CriticalPathReranksTheReadySetAfterASplice) {
+  Dag g = mustBuild(planFile({task("t1", {}, "expand"), task("t2"), task("t3")}));
+  std::vector<double> d(g.size(), 1.0);
+  auto policy = std::make_unique<CriticalPathPolicy>(bottomLevels(g, d));
+  CriticalPathPolicy* cp = policy.get();
+  Scheduler s(g, std::move(policy));
+  s.start();
+  auto e = s.dispatchNext();  // t1 (ties in plan order); t2 and t3 ready
+  ASSERT_EQ(g.id(e->node), "t1");
+  ASSERT_TRUE(g.expand(e->node, {subTask("s1", {}, 30)}).ok());
+  std::vector<double> durations = estimatedDurations(g, 1.0);
+  durations[node(g, "t3")] = 50;  // pretend t3 became the longest
+  s.onExpanded(e->node, bottomLevels(g, durations));
+  EXPECT_DOUBLE_EQ(cp->priority(node(g, "t1.1")), 30.0);
+  EXPECT_EQ(s.peekNext(), node(g, "t3"));  // re-ranked
+  s.complete(e->node);
+  EXPECT_EQ(g.id(s.dispatchNext()->node), "t3");
+  EXPECT_EQ(g.id(s.dispatchNext()->node), "t1.1");  // 30 + join 0 beats t2's 1
+}

@@ -44,6 +44,7 @@ class RedisBus final : public Bus {
                                     const std::string& afterId, int count) override;
   std::optional<std::string> hget(const std::string& key, const std::string& field) override;
   bool exists(const std::string& key) override;
+  std::optional<std::string> get(const std::string& key) override;
   std::vector<PendingEntry> pending(const std::string& stream, const std::string& group, std::int64_t minIdleMs,
                                     const std::string& afterId, int count) override;
   std::optional<std::string> entryData(const std::string& stream, const std::string& id) override;

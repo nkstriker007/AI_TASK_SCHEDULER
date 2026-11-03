@@ -65,6 +65,12 @@ void Scheduler::retry(NodeId n) {
   push(n);
 }
 
+void Scheduler::onExpanded(NodeId e, std::vector<double> priorities) {
+  state_.onExpanded(e);
+  tickets_.resize(dag_->size(), 0);
+  policy_->reprioritize(std::move(priorities));
+}
+
 std::vector<NodeId> Scheduler::fail(NodeId n) {
   // A RETRYING task already left flight when it was put back in the ready set.
   const bool wasInFlight = state_.state(n) == TaskState::Queued || state_.state(n) == TaskState::Running;

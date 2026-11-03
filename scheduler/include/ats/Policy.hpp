@@ -28,6 +28,9 @@ class SchedulingPolicy {
   // Larger runs earlier. Comparable across requests for policies that define it (critical path:
   // bottom level in seconds); 0 for policies without a priority.
   virtual double priority(NodeId) const { return 0.0; }
+  // The graph grew (dynamic expansion): new per-task priorities, one per task including the new
+  // ones. Tasks already in the ready set are re-ordered. No-op for policies without priorities.
+  virtual void reprioritize(std::vector<double> /*priorities*/) {}
   bool empty() const { return size() == 0; }
 };
 
@@ -58,6 +61,7 @@ class CriticalPathPolicy final : public SchedulingPolicy {
   std::optional<NodeId> peek() const override;
   std::size_t size() const override { return heap_.size(); }
   double priority(NodeId n) const override { return bottom_.at(n); }
+  void reprioritize(std::vector<double> bottomLevels) override;
 
  private:
   struct Before {

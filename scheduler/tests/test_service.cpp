@@ -44,6 +44,11 @@ class FakeBus final : public ats::Bus {
     return f->second;
   }
   bool exists(const std::string& key) override { return strings.count(key) || hashes.count(key); }
+  std::optional<std::string> get(const std::string& key) override {
+    auto it = strings.find(key);
+    if (it == strings.end()) return std::nullopt;
+    return it->second;
+  }
   // Janitor: `workerPending` plays the workers group's pending list on tasks:* streams.
   std::vector<ats::PendingEntry> pending(const std::string& stream, const std::string& group, std::int64_t minIdleMs,
                                          const std::string& afterId, int count) override {
@@ -778,4 +783,232 @@ TEST(ServiceJanitor, ALateCompletionIsStillAcceptedAfterTheJanitorAckedItsEntry)
   f.completed("req_test", "t1", 1);   // the "dead" worker was only slow (8.5)
   EXPECT_EQ(f.bus.taskState("req_test", "t1"), "COMPLETED");
   EXPECT_EQ(f.dispatched().back(), "req_test:t2:1");
+}
+
+// ------------------------------------------------------------------------------------------
+// Day 6: dynamic expansion in atsd (D53, design doc 8.11)
+
+namespace {
+
+json subtask(const std::string& id, std::vector<std::string> deps = {}) {
+  return {{"id", id}, {"type", "research"}, {"title", "Sub " + id}, {"instruction", "Do " + id},
+          {"depends_on", deps}, {"hints", {{"estimated_seconds", 5}}}};
+}
+
+json subplan(std::vector<json> tasks) {
+  json arr = json::array();
+  for (auto& t : tasks) arr.push_back(t);
+  return {{"tasks", arr}};
+}
+
+// t1 research, t2 expand, t3 compare(t1, t2), t4 report(t3)
+json expandFile() {
+  return planFile({task("t1"), task("t2", {}, "expand"), task("t3", {"t1", "t2"}, "compare"),
+                   task("t4", {"t3"}, "report")});
+}
+
+// The worker side of an expand attempt: commit the subplan, report it.
+void commitSubplan(Fixture& f, const std::string& rid, const std::string& tid, int attempt, const json& sp,
+                   bool committed = true) {
+  if (committed) f.bus.strings["result:" + rid + ":" + tid] = sp.dump();
+  f.event({{"event", "task_completed"}, {"attempt_id", rid + ":" + tid + ":" + std::to_string(attempt)},
+           {"worker_id", "w1"}, {"ts_ms", f.now}, {"result_key", "result:" + rid + ":" + tid},
+           {"committed", committed}, {"result_kind", "subplan"}, {"exec_ms", 5}});
+}
+
+json messageFor(const Fixture& f, const std::string& attemptId) {
+  for (const auto& m : f.bus.messages())
+    if (m["attempt_id"] == attemptId) return m;
+  return json();
+}
+
+std::vector<std::string> loggedEvents(const Fixture& f, const std::string& kind) {
+  std::vector<std::string> out;
+  std::istringstream lines(f.log.str());
+  for (std::string line; std::getline(lines, line);) {
+    json j = json::parse(line);
+    if (j["event"] == kind) out.push_back(j.value("detail", ""));
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(ServiceExpand, SpliceDispatchesTheSubplanAndTheJoinFeedsTheDependents) {
+  Fixture f;
+  f.submit(expandFile());
+  ASSERT_EQ(f.dispatched(), (std::vector<std::string>{"req_test:t1:1", "req_test:t2:1"}));
+  EXPECT_EQ(messageFor(f, "req_test:t2:1")["type"], "expand");
+  f.completed("req_test", "t1", 1);
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1"), subtask("s2"), subtask("s3", {"s1"})}));
+
+  // The new tasks get the expand task's result as input (contract #2 example).
+  EXPECT_EQ(f.dispatched(), (std::vector<std::string>{"req_test:t1:1", "req_test:t2:1", "req_test:t2.1:1",
+                                                      "req_test:t2.2:1"}));
+  json m = messageFor(f, "req_test:t2.1:1");
+  EXPECT_EQ(m["task_id"], "t2.1");
+  EXPECT_EQ(m["inputs"], (json{{"t2", "result:req_test:t2"}}));
+  EXPECT_EQ(m["estimated_seconds"], 5);
+  EXPECT_EQ(f.bus.taskState("req_test", "t2"), "COMPLETED");
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.3"), "WAITING");
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.join"), "WAITING");
+  EXPECT_EQ(f.svc.stats().expansions, 1u);
+  EXPECT_EQ(f.svc.stats().splicedTasks, 3u);
+  EXPECT_THAT(loggedEvents(f, "graph_expanded"),
+              ::testing::ElementsAre("3 tasks: t2.1, t2.2, t2.3; t2.join -> t3"));
+
+  f.completed("req_test", "t2.1", 1);
+  EXPECT_EQ(messageFor(f, "req_test:t2.3:1")["inputs"],
+            (json{{"t2", "result:req_test:t2"}, {"t2.1", "result:req_test:t2.1"}}));
+  f.completed("req_test", "t2.2", 1);
+  f.completed("req_test", "t2.3", 1);
+  // t2.join completes inside atsd: never dispatched. t3 receives t1 and the subplan's sinks.
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.join"), "COMPLETED");
+  for (const auto& id : f.dispatched()) EXPECT_EQ(id.find("t2.join"), std::string::npos) << id;
+  json t3 = messageFor(f, "req_test:t3:1");
+  ASSERT_FALSE(t3.is_null());
+  EXPECT_EQ(t3["inputs"], (json{{"t1", "result:req_test:t1"}, {"t2.2", "result:req_test:t2.2"},
+                                {"t2.3", "result:req_test:t2.3"}}));
+  f.completed("req_test", "t3", 1);
+  f.completed("req_test", "t4", 1);
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["sink"], "t4");
+}
+
+TEST(ServiceExpand, ADuplicateOrLateExpandResultNeverSplicesTwice) {
+  Fixture f;
+  f.submit(expandFile());
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1"), subtask("s2")}));
+  const auto before = f.dispatched();
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1")}), /*committed=*/false);
+  EXPECT_EQ(f.dispatched(), before);
+  EXPECT_EQ(f.svc.stats().expansions, 1u);
+  EXPECT_EQ(f.svc.stats().duplicateCompletions, 1u);
+  EXPECT_EQ(loggedEvents(f, "graph_expanded").size(), 1u);
+}
+
+TEST(ServiceExpand, ALostExpandAttemptsLateResultIsSplicedOnce) {
+  Fixture f;
+  f.submit(expandFile());
+  f.advance(10'000);  // t1 and t2 attempt 1 lost
+  f.advance(1'000);   // attempt 2 of both dispatched
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1")}));  // the slow attempt 1 wins SET NX
+  EXPECT_EQ(f.bus.taskState("req_test", "t2"), "COMPLETED");
+  EXPECT_EQ(f.dispatched().back(), "req_test:t2.1:1");
+  commitSubplan(f, "req_test", "t2", 2, subplan({subtask("s1")}), /*committed=*/false);
+  EXPECT_EQ(f.svc.stats().expansions, 1u);
+}
+
+TEST(ServiceExpand, AnInvalidSubplanFailsTheExpandTaskAndCancelsItsDependents) {
+  const std::vector<std::pair<std::string, json>> bad = {
+      {"cycle", subplan({subtask("s1", {"s2"}), subtask("s2", {"s1"})})},
+      {"unknown local dep", subplan({subtask("s1", {"s9"})})},
+      {"nested expand", subplan({json{{"id", "s1"}, {"type", "expand"}, {"title", "x"}, {"instruction", "x"}}})},
+      {"wrong id", subplan({subtask("t9")})},
+      {"empty", json{{"tasks", json::array()}}},
+      {"artifact pointer", json{{"artifact", "req_test/t2.1.json"}, {"bytes", 90000}}},
+  };
+  for (const auto& [name, sp] : bad) {
+    Fixture f;
+    f.submit(expandFile());
+    f.completed("req_test", "t1", 1);
+    commitSubplan(f, "req_test", "t2", 1, sp);
+    EXPECT_EQ(f.bus.taskState("req_test", "t2"), "FAILED") << name;
+    EXPECT_EQ(f.bus.taskState("req_test", "t3"), "CANCELLED") << name;
+    EXPECT_EQ(f.bus.taskState("req_test", "t4"), "CANCELLED") << name;
+    EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "FAILED") << name;
+    EXPECT_THAT(f.bus.hashes["request:req_test"]["error"], ::testing::HasSubstr("t2 expansion rejected")) << name;
+    EXPECT_EQ(f.svc.stats().rejectedExpansions, 1u) << name;
+    EXPECT_EQ(f.dispatched().size(), 2u) << name;
+  }
+}
+
+TEST(ServiceExpand, AMissingResultFailsTheExpandTask) {
+  Fixture f;
+  f.submit(expandFile());
+  f.completed("req_test", "t2", 1);  // event without a committed key
+  EXPECT_EQ(f.bus.taskState("req_test", "t2"), "FAILED");
+  EXPECT_THAT(loggedEvents(f, "expansion_rejected"), ::testing::ElementsAre(::testing::HasSubstr("no committed result")));
+}
+
+TEST(ServiceExpand, TheRequestTaskLimitIsEnforced) {
+  ats::ServiceConfig c = simConfig();
+  c.maxRequestTasks = 6;  // 4 planned + 2 spliced allowed
+  Fixture f(c);
+  f.submit(expandFile());
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1"), subtask("s2"), subtask("s3")}));
+  EXPECT_EQ(f.bus.taskState("req_test", "t2"), "FAILED");
+  EXPECT_THAT(loggedEvents(f, "expansion_rejected"), ::testing::ElementsAre(::testing::HasSubstr("exceed 6 tasks")));
+}
+
+TEST(ServiceExpand, AtMostMaxExpansionsPerRequest) {
+  ats::ServiceConfig c = simConfig();
+  c.maxExpansions = 1;
+  Fixture f(c);
+  f.submit(planFile({task("t1", {}, "expand"), task("t2", {}, "expand"), task("t3", {"t1", "t2"}, "report")}));
+  commitSubplan(f, "req_test", "t1", 1, subplan({subtask("s1")}));
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1")}));
+  EXPECT_EQ(f.bus.taskState("req_test", "t1"), "COMPLETED");
+  EXPECT_EQ(f.bus.taskState("req_test", "t2"), "FAILED");
+  EXPECT_THAT(loggedEvents(f, "expansion_rejected"), ::testing::ElementsAre(::testing::HasSubstr("limit 1")));
+  EXPECT_EQ(f.bus.taskState("req_test", "t1.1"), "QUEUED");  // the first expansion still runs
+}
+
+TEST(ServiceExpand, AFailedSubtaskCancelsTheJoinAndTheDependents) {
+  Fixture f;
+  f.submit(expandFile());
+  f.completed("req_test", "t1", 1);
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1"), subtask("s2")}));
+  f.failed("req_test", "t2.1", 1, "permanent");
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.join"), "CANCELLED");
+  EXPECT_EQ(f.bus.taskState("req_test", "t3"), "CANCELLED");
+  f.completed("req_test", "t2.2", 1);
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "FAILED");
+}
+
+TEST(ServiceExpand, CriticalPathPrioritiesAreRecomputedAfterTheSplice) {
+  ats::ServiceConfig c = simConfig(/*simCap=*/1, "critical-path");
+  Fixture f(c);
+  json file = planFile({task("t1", {}, "expand"), task("t2")});
+  file["plan"]["tasks"][0]["hints"] = {{"estimated_seconds", 1}};
+  file["plan"]["tasks"][1]["hints"] = {{"estimated_seconds", 20}};
+  f.submit(file);  // t2 (20) before t1 (1)
+  ASSERT_EQ(f.dispatched(), (std::vector<std::string>{"req_test:t2:1"}));
+  f.completed("req_test", "t2", 1);
+  json longSub = subtask("s2");
+  longSub["hints"]["estimated_seconds"] = 50;
+  commitSubplan(f, "req_test", "t1", 1, subplan({subtask("s1"), longSub, subtask("s3")}));
+  EXPECT_EQ(f.dispatched().back(), "req_test:t1.2:1");  // the 50 s subtask first
+}
+
+TEST(ServiceExpand, ARestartReSplicesWithTheSameIdsAndSkipsCommittedSubtasks) {
+  Fixture f;
+  // What the previous atsd left: t1, t2 (the subplan) and t2.1 committed; t2.2 on attempt 1.
+  const json sp = subplan({subtask("s1"), subtask("s2")});
+  f.bus.strings["result:req_test:t1"] = R"({"content":"m"})";
+  f.bus.strings["result:req_test:t2"] = sp.dump();
+  f.bus.strings["result:req_test:t2.1"] = R"({"content":"a"})";
+  f.bus.hashes["request:req_test"] = {{"status", "RUNNING"},
+                                      {"task:t1", R"({"state":"COMPLETED","attempt":1})"},
+                                      {"task:t2", R"({"state":"COMPLETED","attempt":1})"},
+                                      {"task:t2.1", R"({"state":"COMPLETED","attempt":1})"},
+                                      {"task:t2.2", R"({"state":"RUNNING","attempt":1})"}};
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", expandFile().dump()});
+  f.svc.recoverPending();
+  EXPECT_EQ(f.svc.stats().expansions, 1u);
+  EXPECT_EQ(f.dispatched(), (std::vector<std::string>{"req_test:t2.2:2"}));  // only the unfinished one
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.1"), "COMPLETED");
+  f.completed("req_test", "t2.2", 2);
+  EXPECT_EQ(f.bus.taskState("req_test", "t2.join"), "COMPLETED");
+  EXPECT_EQ(f.dispatched().back(), "req_test:t3:1");
+}
+
+TEST(ServiceExpand, TheJanitorKnowsSplicedTasks) {
+  Fixture f(janitorConfig(0));
+  f.submit(expandFile());
+  commitSubplan(f, "req_test", "t2", 1, subplan({subtask("s1")}));  // message 3 = t2.1
+  leavePending(f.bus, 3);
+  EXPECT_EQ(f.svc.runJanitor(), 0u);  // t2.1 attempt 1 is live
+  f.completed("req_test", "t2.1", 1);
+  EXPECT_EQ(f.svc.runJanitor(), 1u);
 }

@@ -55,7 +55,7 @@ Helpers in `planner/planner/messages.py`: `encode_output(content, **extra)` buil
 | `attempt_id` | string | must equal `<request_id>:<task_id>:<attempt>` |
 | `type` | enum | the plan task types (research, summarize, analyze, compare, report, expand) |
 | `instruction` | string | non-empty |
-| `inputs` | object | optional, default `{}`; dependency task ID → its result key in this request |
+| `inputs` | object | optional, default `{}`; dependency task ID → its result key in this request. A dependency on a join (`t2.join`) is replaced by the join's own dependencies, so a dependent of a spliced subplan gets `{"t2.1": …, "t2.2": …}` (D53) |
 | `deadline_ms` | int | absolute Unix epoch ms; atsd owns it (8.7) |
 | `estimated_seconds` | number or null | optional; the plan hint, used by the sim executor |
 

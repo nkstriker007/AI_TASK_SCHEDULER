@@ -15,8 +15,10 @@ namespace ats {
 using NodeId = std::size_t;
 
 struct DagBuildResult;
+struct DagExpandResult;
 
-// Immutable dependency graph for one plan. Edge parent -> child means "child consumes parent's output".
+// Dependency graph for one plan. Edge parent -> child means "child consumes parent's output".
+// Built once by build(); afterwards it only grows, through expand() (dynamic expansion, 8.11).
 class Dag {
  public:
   using BuildResult = DagBuildResult;
@@ -24,6 +26,18 @@ class Dag {
   // Structural validation + construction: duplicate ids, unknown/self/duplicate dependencies,
   // and cycles (Kahn's algorithm, with the offending cycle reported as a path).
   static BuildResult build(const Plan& plan);
+
+  // Dynamic expansion (design doc 8.11, D53). Splices `subplan` (local ids s1, s2, ...) under the
+  // expand task `e`, which must not have completed yet:
+  //   - subplan task i becomes "<e>.<i>" (in subplan order) and depends on e plus its renamed local deps;
+  //   - a synthetic "<e>.join" node depends on every subplan sink;
+  //   - every former child of e now depends on "<e>.join" instead of e.
+  // Checks first (e is an expand task that was never expanded, 1-20 tasks, no nested expand,
+  // local dependencies only, no duplicate/self/unknown dependency, no cycle) and changes nothing
+  // if any check fails. New node ids are appended, so existing NodeIds stay valid.
+  DagExpandResult expand(NodeId e, const std::vector<TaskSpec>& subplan);
+  static std::string joinId(const std::string& expandId) { return expandId + ".join"; }
+  bool isJoin(NodeId n) const;  // a synthetic join node: completed by the runtime, never dispatched
 
   Dag(const Dag&) = default;
   Dag(Dag&&) noexcept = default;
@@ -60,6 +74,14 @@ class Dag {
 struct DagBuildResult {
   std::optional<Dag> dag;              // set only when issues is empty
   std::vector<ValidationIssue> issues;
+};
+
+struct DagExpandResult {
+  std::vector<NodeId> added;           // the subplan tasks, in subplan order
+  std::optional<NodeId> join;          // the join node
+  std::vector<NodeId> rewired;         // former children of the expand task, now children of the join
+  std::vector<ValidationIssue> issues; // nothing was changed when non-empty
+  bool ok() const { return issues.empty(); }
 };
 
 }  // namespace ats

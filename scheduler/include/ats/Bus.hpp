@@ -59,6 +59,9 @@ class Bus {
   // EXISTS <key>
   virtual bool exists(const std::string& key) = 0;
 
+  // GET <key>; nullopt if it does not exist. Used to read an expand task's committed subplan (D53).
+  virtual std::optional<std::string> get(const std::string& key) = 0;
+
   // ---- used by the janitor (D49) ----
 
   // XPENDING <stream> <group> IDLE <minIdleMs> <start> + <count>. `afterId` empty = from the

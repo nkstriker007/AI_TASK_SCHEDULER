@@ -28,6 +28,17 @@ void CriticalPathPolicy::push(NodeId n) {
   heap_.push(n);
 }
 
+void CriticalPathPolicy::reprioritize(std::vector<double> bottomLevels) {
+  if (bottomLevels.size() < bottom_.size()) throw std::invalid_argument("CriticalPathPolicy: fewer priorities than tasks");
+  std::vector<NodeId> ready;
+  while (!heap_.empty()) {
+    ready.push_back(heap_.top());
+    heap_.pop();
+  }
+  bottom_ = std::move(bottomLevels);  // same object, so the comparator's pointer stays valid
+  for (NodeId n : ready) heap_.push(n);
+}
+
 std::optional<NodeId> CriticalPathPolicy::pop() {
   if (heap_.empty()) return std::nullopt;
   NodeId n = heap_.top();

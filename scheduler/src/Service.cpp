@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -40,6 +41,8 @@ struct Service::RequestRun {
   std::uint64_t lastServed = 0;          // serveCounter_ at its last dispatch; 0 = never
   std::uint64_t arrival = 0;             // ingest order
   std::size_t inFlight = 0;              // attempts holding a capability slot (fair share, D41)
+  int expansions = 0;                    // expand results spliced so far (D53)
+  bool resumed = false;                  // picked up again after a restart (D44)
   std::string entryId;                   // requests:new entry, acknowledged when the request finishes (D44)
   bool finished = false;
 };
@@ -210,27 +213,10 @@ bool Service::submitPlanFile(std::string_view text, const std::string& entryId, 
   req->entryId = entryId;
   req->arrival = ++arrivalCounter_;
   std::size_t restored = 0;
+  req->resumed = resume;
   for (NodeId n = 0; n < g.size(); ++n) {
     req->nodes[n].capability = capabilityFor(g.task(n).type);
-    if (resume) {
-      // D44: a committed result means the task is done; it completes when the policy reaches it,
-      // with no message. Otherwise numbering continues after the attempts already made, so
-      // events from those attempts can never be mistaken for the new ones.
-      NodeRun& nr = req->nodes[n];
-      if (auto prev = bus_.hget(keys::requestKey(requestId), "task:" + g.id(n))) {
-        try {
-          json p = json::parse(*prev);
-          if (p.is_object() && p.contains("attempt") && p["attempt"].is_number_integer())
-            nr.attemptBase = std::max(0, p["attempt"].get<int>());
-        } catch (const json::exception&) {
-        }
-      }
-      nr.attempt = nr.attemptBase;
-      if (bus_.exists(keys::resultKey(requestId, g.id(n)))) {
-        nr.completeOnDispatch = true;
-        ++restored;
-      }
-    }
+    if (resume && restoreNode(*req, n)) ++restored;
     if (std::find(req->capabilities.begin(), req->capabilities.end(), req->nodes[n].capability) ==
         req->capabilities.end())
       req->capabilities.push_back(req->nodes[n].capability);
@@ -261,6 +247,26 @@ bool Service::submitPlanFile(std::string_view text, const std::string& entryId, 
   for (NodeId n = 0; n < g.size(); ++n)
     if (r.sched->state().state(n) == TaskState::Ready) writeTask(r, n, "READY");
   return !entryId.empty();
+}
+
+// D44: after a restart, numbering continues after the attempts recorded in request:<id>, so events
+// from those attempts are never mistaken for new ones, and a committed result means the task is
+// done: it completes when the policy reaches it, with no message. Returns true for the latter.
+bool Service::restoreNode(RequestRun& req, NodeId n) {
+  const std::string& rid = req.dag.requestId();
+  NodeRun& nr = req.nodes[n];
+  if (auto prev = bus_.hget(keys::requestKey(rid), "task:" + req.dag.id(n))) {
+    try {
+      json p = json::parse(*prev);
+      if (p.is_object() && p.contains("attempt") && p["attempt"].is_number_integer())
+        nr.attemptBase = std::max(0, p["attempt"].get<int>());
+    } catch (const json::exception&) {
+    }
+  }
+  nr.attempt = nr.attemptBase;
+  if (!bus_.exists(keys::resultKey(rid, req.dag.id(n)))) return false;
+  nr.completeOnDispatch = true;
+  return true;
 }
 
 void Service::reject(const std::string& requestId, const std::string& error) {
@@ -335,9 +341,7 @@ void Service::handleEvent(std::string_view text) {
     } else {  // QUEUED or RUNNING, possibly waiting out a backoff
       if (nr.inFlight) releaseSlot(req, n);
       nr.retryAtMs.reset();
-      completeNode(req, n, worker, attempt);
-      if (ev.value("result_kind", "output") == "subplan")
-        log("subplan_not_spliced", rid, tid, attempt, worker, "dynamic expansion is Day 6");
+      completeNode(req, n, worker, attempt);  // splices first if this is an expand task (D53)
     }
   } else if (kind == "task_failed") {
     if (attempt == nr.attempt && nr.inFlight && (st == TaskState::Queued || st == TaskState::Running)) {
@@ -629,8 +633,17 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
   nr.attempt = nr.attemptBase + d.attempt;
 
   const std::int64_t deadline = now_() + capabilityConfig(nr.capability).timeoutMs;
+  // A join has no result of its own: a dependent of t2.join receives the subplan sinks' results
+  // (design doc 8.11), keyed by their spliced ids.
   json inputs = json::object();
-  for (NodeId p : g.parents(d.node)) inputs[g.id(p)] = keys::resultKey(rid, g.id(p));
+  std::function<void(NodeId)> addInput = [&](NodeId p) {
+    if (g.isJoin(p)) {
+      for (NodeId pp : g.parents(p)) addInput(pp);
+    } else {
+      inputs[g.id(p)] = keys::resultKey(rid, g.id(p));
+    }
+  };
+  for (NodeId p : g.parents(d.node)) addInput(p);
   json msg = {
       {"request_id", rid},
       {"task_id", t.id},
@@ -665,10 +678,85 @@ void Service::releaseSlot(RequestRun& req, NodeId n) {
 // ------------------------------------------------------------------------------- outcomes
 
 void Service::completeNode(RequestRun& req, NodeId n, const std::string& worker, int attempt) {
+  // An expand task's first committed result is spliced before the task completes, so completing
+  // it releases the new tasks (D53). Only reached once per task, so a duplicate or late result can
+  // never splice twice. If the subplan is rejected, the expand task fails instead.
+  if (req.dag.task(n).type == TaskType::Expand && !req.dag.isJoin(n) && !spliceExpansion(req, n, worker, attempt))
+    return;
   const std::vector<NodeId> ready = req.sched->complete(n);
   writeTask(req, n, "COMPLETED");
-  log("completed", req.dag.requestId(), req.dag.id(n), attempt, worker);
+  log(req.dag.isJoin(n) ? "join_completed" : "completed", req.dag.requestId(), req.dag.id(n), attempt, worker);
   for (NodeId c : ready) writeTask(req, c, "READY");
+}
+
+bool Service::spliceExpansion(RequestRun& req, NodeId e, const std::string& worker, int attempt) {
+  Dag& g = req.dag;
+  const std::string rid = g.requestId();
+  const std::string eid = g.id(e);
+  auto reject = [&](const std::string& why) {
+    ++stats_.rejectedExpansions;
+    log("expansion_rejected", rid, eid, attempt, worker, why);
+    failNode(req, e, eid + " expansion rejected: " + why);  // D5: its dependents are cancelled
+    return false;
+  };
+  auto describe = [](const std::vector<ValidationIssue>& issues) {
+    std::string out;
+    for (std::size_t i = 0; i < issues.size(); ++i) out += (i ? "; " : "") + issues[i].code + ": " + issues[i].message;
+    return out;
+  };
+
+  if (req.expansions >= config_.maxExpansions)
+    return reject("the request already has " + std::to_string(req.expansions) + " expansions (limit " +
+                  std::to_string(config_.maxExpansions) + ")");
+  const std::string key = keys::resultKey(rid, eid);
+  const auto raw = bus_.get(key);
+  if (!raw) return reject("no committed result at " + key);
+  try {
+    json v = json::parse(*raw);
+    if (v.is_object() && v.contains("artifact"))
+      return reject("the subplan was stored as an artifact (over 64 KB), which atsd cannot read");
+  } catch (const json::exception&) {
+  }
+  SubplanResult sub = parseSubplan(*raw, eid);
+  if (!sub.ok()) return reject("invalid subplan: " + describe(sub.issues));
+  const std::size_t realTasks = g.size() - static_cast<std::size_t>(req.expansions);  // joins excluded
+  if (realTasks + sub.tasks.size() > config_.maxRequestTasks)
+    return reject(std::to_string(sub.tasks.size()) + " more tasks would exceed " +
+                  std::to_string(config_.maxRequestTasks) + " tasks in the request");
+  DagExpandResult r = g.expand(e, sub.tasks);
+  if (!r.ok()) return reject("invalid subplan: " + describe(r.issues));
+
+  ++req.expansions;
+  ++stats_.expansions;
+  stats_.splicedTasks += r.added.size();
+  req.nodes.resize(g.size());
+  std::vector<NodeId> fresh = r.added;
+  fresh.push_back(*r.join);
+  std::vector<std::pair<std::string, std::string>> fields;
+  std::string names;
+  for (NodeId n : fresh) {
+    NodeRun& nr = req.nodes[n];
+    nr.capability = capabilityFor(g.task(n).type);
+    if (n == *r.join) {
+      nr.completeOnDispatch = true;  // completed inside atsd the moment it is ready; never dispatched
+    } else {
+      if (std::find(req.capabilities.begin(), req.capabilities.end(), nr.capability) == req.capabilities.end())
+        req.capabilities.push_back(nr.capability);
+      if (req.resumed) restoreNode(req, n);  // re-splicing after a restart: same ids, keep progress
+      names += (names.empty() ? "" : ", ") + g.id(n);
+    }
+    fields.emplace_back("task:" + g.id(n), taskStateJson("WAITING", nr.attempt));
+  }
+  fields.emplace_back("updated_ms", std::to_string(now_()));
+  bus_.hset(keys::requestKey(rid), fields);
+  req.sched->onExpanded(e, bottomLevels(g, estimatedDurations(g, config_.defaultSeconds)));
+
+  std::string rewired;
+  for (NodeId c : r.rewired) rewired += (rewired.empty() ? "" : ", ") + g.id(c);
+  log("graph_expanded", rid, eid, attempt, worker,
+      std::to_string(r.added.size()) + " tasks: " + names + "; " + g.id(*r.join) + " -> " +
+          (rewired.empty() ? "(none)" : rewired));
+  return true;
 }
 
 void Service::failNode(RequestRun& req, NodeId n, const std::string& reason) {

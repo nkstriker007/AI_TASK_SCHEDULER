@@ -244,3 +244,67 @@ TEST(Simulator, RandomGraphsRespectSchedulingBounds) {
   }
   EXPECT_EQ(runs, 150 * 2 * 6);
 }
+
+// ------------------------------------------------------------------------------------------
+// Dynamic expansion in the simulator (Day 6, D53): hints.sim_subplan is spliced at runtime.
+
+namespace {
+
+Dag expandCanned() {
+  LoadResult l = loadPlanFile(std::string(ATS_FIXTURES_DIR) + "/expand_canned.json");
+  if (!l.ok()) throw std::runtime_error("expand_canned.json did not load");
+  return std::move(*Dag::build(*l.plan).dag);
+}
+
+}  // namespace
+
+TEST(SimulatorExpand, SplicesTheCannedSubplanAndMatchesTheHandComputedSchedule) {
+  // t1 20 s, t2 expand 5 s -> s1 20, s2 25, s3 15; t3 compare(t1, t2) 15; t4 report 15.
+  SimConfig cfg;
+  cfg.workers = 0;
+  SimReport r = simulate(expandCanned(), cfg);
+  ASSERT_TRUE(r.graph);
+  const Dag& g = *r.graph;
+  EXPECT_EQ(r.expansions, 1u);
+  EXPECT_EQ(r.splicedTasks, 3u);
+  EXPECT_EQ(g.size(), 8u);  // 4 planned + 3 spliced + t2.join
+  EXPECT_TRUE(r.succeeded);
+  EXPECT_EQ(r.completed, 8u);
+  EXPECT_DOUBLE_EQ(r.makespan, 60.0);           // 5 + 25 (t2.2) + 0 (join) + 15 + 15
+  EXPECT_DOUBLE_EQ(r.sequentialSeconds, 115.0);
+  EXPECT_DOUBLE_EQ(r.criticalPathSeconds, 60.0);
+  EXPECT_EQ(ids(g, r.criticalPath), (std::vector<std::string>{"t2", "t2.2", "t2.join", "t3", "t4"}));
+}
+
+TEST(SimulatorExpand, AJoinNeverTakesAWorker) {
+  SimConfig cfg;
+  cfg.workers = 1;
+  SimReport r = simulate(expandCanned(), cfg);
+  EXPECT_DOUBLE_EQ(r.makespan, 115.0);  // fully serial: the sum of the real tasks, join adds nothing
+  const Dag& g = *r.graph;
+  for (const auto& a : r.attempts) EXPECT_FALSE(g.isJoin(a.node)) << g.id(a.node);
+  bool joinDone = false;
+  for (const auto& e : r.events)
+    if (g.isJoin(e.node)) joinDone = e.kind == SimEventKind::Complete && e.worker == -1;
+  EXPECT_TRUE(joinDone);
+}
+
+TEST(SimulatorExpand, AFailedSplicedTaskCancelsTheJoinAndItsDependents) {
+  SimConfig cfg;
+  cfg.workers = 0;
+  cfg.failTaskIds = {"t2.2"};  // spliced ids are accepted before they exist
+  SimReport r = simulate(expandCanned(), cfg);
+  EXPECT_FALSE(r.succeeded);
+  EXPECT_EQ(r.failed, 1u);
+  EXPECT_EQ(r.cancelled, 3u);  // t2.join, t3, t4
+}
+
+TEST(SimulatorExpand, PlansWithoutCannedSubplansAreUnchanged) {
+  SimConfig cfg;
+  cfg.workers = 2;
+  SimReport r = simulate(companyResearch(), cfg);
+  EXPECT_EQ(r.expansions, 0u);
+  ASSERT_TRUE(r.graph);
+  EXPECT_EQ(r.graph->size(), companyResearch().size());
+  EXPECT_DOUBLE_EQ(r.makespan, 65.0);
+}

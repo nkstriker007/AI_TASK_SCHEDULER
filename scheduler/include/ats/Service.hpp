@@ -62,6 +62,9 @@ struct ServiceConfig {
   // Janitor (D49): every janitorIntervalMs, acknowledge entries in tasks:<capability> (group
   // "workers") that have been pending for at least janitorMinIdleMs and whose attempt is already
   // resolved. Hygiene only: it never retries or changes a task. 0 disables it.
+  // Dynamic expansion limits (design doc 8.11, D53); an expand result over them fails the expand task.
+  int maxExpansions = 3;                // expansions per request
+  std::size_t maxRequestTasks = 100;    // tasks per request after all expansions (join nodes not counted)
   std::int64_t janitorIntervalMs = 30'000;
   std::int64_t janitorMinIdleMs = 60'000;
 };
@@ -86,6 +89,7 @@ class Service {
     std::size_t ingested = 0, rejected = 0, succeeded = 0, failed = 0;
     std::size_t resumed = 0, restoredTasks = 0;  // requests picked up again after a restart (D44)
     std::size_t janitorRuns = 0, janitorAcked = 0;  // D49
+    std::size_t expansions = 0, splicedTasks = 0, rejectedExpansions = 0;  // D53
     std::size_t dispatched = 0, retries = 0, lostAttempts = 0;
     std::size_t duplicateCompletions = 0, ignoredEvents = 0;
   };
@@ -149,6 +153,8 @@ class Service {
   void diag(const std::string& message);
   std::int64_t backoffFor(const std::string& capability, int attempt);
   bool attemptResolved(const std::string& data);
+  bool restoreNode(RequestRun& req, NodeId n);
+  bool spliceExpansion(RequestRun& req, NodeId e, const std::string& worker, int attempt);
 
   Bus& bus_;
   ServiceConfig config_;

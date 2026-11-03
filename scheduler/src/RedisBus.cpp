@@ -162,6 +162,12 @@ bool RedisBus::exists(const std::string& key) {
   return reply->type == REDIS_REPLY_INTEGER && reply->integer > 0;
 }
 
+std::optional<std::string> RedisBus::get(const std::string& key) {
+  ReplyPtr reply(command({"GET", key}));
+  if (reply->type != REDIS_REPLY_STRING) return std::nullopt;
+  return str(reply.get());
+}
+
 std::vector<PendingEntry> RedisBus::pending(const std::string& stream, const std::string& group,
                                             std::int64_t minIdleMs, const std::string& afterId, int count) {
   // IDLE and exclusive "(" ranges need Redis 6.2+ (docker-compose runs Redis 7).

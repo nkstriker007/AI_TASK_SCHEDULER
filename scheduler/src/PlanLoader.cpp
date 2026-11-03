@@ -269,6 +269,21 @@ LoadResult parsePlanFile(std::string_view text) {
   return result;
 }
 
+SubplanResult parseSubplan(std::string_view text, const std::string& ownerId) {
+  Checker c;
+  SubplanResult result;
+  const json doc = json::parse(text.begin(), text.end(), /*cb=*/nullptr, /*allow_exceptions=*/false);
+  if (doc.is_discarded()) {
+    c.schema("subplan", "invalid JSON", ownerId);
+  } else {
+    TaskSpec owner;
+    parseSimSubplan(c, doc, "subplan", ownerId, owner);
+    if (c.issues.empty()) result.tasks = std::move(owner.simSubplan);
+  }
+  result.issues = std::move(c.issues);
+  return result;
+}
+
 LoadResult loadPlanFile(const std::filesystem::path& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {

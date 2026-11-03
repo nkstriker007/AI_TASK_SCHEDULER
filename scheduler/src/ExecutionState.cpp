@@ -106,6 +106,16 @@ std::vector<NodeId> ExecutionState::onFailed(NodeId n) {
   return cancelled;
 }
 
+void ExecutionState::onExpanded(NodeId e) {
+  require(e, {TaskState::Queued, TaskState::Running}, "onExpanded");
+  const std::size_t old = states_.size();
+  if (dag_->size() < old) throw std::logic_error("onExpanded: the graph shrank");
+  states_.resize(dag_->size(), TaskState::Waiting);
+  attempts_.resize(dag_->size(), 0);
+  unresolved_.resize(dag_->size(), 0);
+  for (NodeId n = old; n < dag_->size(); ++n) unresolved_[n] = dag_->indegree(n);
+}
+
 std::size_t ExecutionState::count(TaskState s) const {
   std::size_t k = 0;
   for (TaskState x : states_) k += (x == s);

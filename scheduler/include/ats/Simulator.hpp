@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -55,12 +56,19 @@ struct SimReport {
   double utilization = 0.0;        // busySeconds / (workers x makespan)
   int peakParallelism = 0;
   std::size_t completed = 0, failed = 0, cancelled = 0, retries = 0;
+  std::size_t expansions = 0, splicedTasks = 0;  // hints.sim_subplan spliced at runtime (D53)
   bool succeeded = false;
+  // The graph the run ended with: the input plus every spliced subplan and join node. Node ids
+  // in events, attempts and criticalPath refer to it.
+  std::optional<Dag> graph;
 };
 
 // Discrete-event simulation with virtual time: fully deterministic for a given config.
 // Dispatch happens immediately after each batch of simultaneous events, so a task starts the
 // moment its last dependency finishes and a worker is free; there is no waiting for whole levels.
+// An expand task with hints.sim_subplan splices that subplan when it completes, as atsd does with
+// a real expand result (D53); join nodes complete at once without a worker. Sequential time and
+// the critical path are computed on the final graph.
 SimReport simulate(const Dag& dag, const SimConfig& config);
 
 }  // namespace ats

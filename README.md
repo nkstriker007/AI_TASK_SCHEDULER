@@ -172,7 +172,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D52)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D53)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -374,7 +374,20 @@ First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
 - E3, 32 tasks + join on 8 workers: 3–6 ms overhead per step; efficiency 40 % at 2 ms tasks, 92 % at 50 ms, 99 % at 0.5 s; break-even about 3 ms
 - Simulator: critical-path priority beats FIFO on straggler-16 (22 s vs 28 s on 4 workers) and layered-24 (18.4 s vs 19.5 s); identical on the others
 
+## Day 6 status: Person B
+
+- [x] Dynamic expansion in atsd (D53, design doc 8.11): the first committed expand result is read, validated (`parseSubplan` + `Dag::expand`) and spliced before the expand task completes: `t2.1…t2.n`, a synthetic `t2.join` that atsd completes itself, dependents rewired to it and given the spliced tasks' results as inputs; critical-path priorities recomputed; limits of 3 expansions and 100 tasks per request; an invalid subplan fails the expand task and cancels its dependents; re-spliced with the same ids after a restart
+- [x] Graph growth in the core: `Dag::expand`, `ExecutionState::onExpanded`, `Scheduler::onExpanded`, `SchedulingPolicy::reprioritize`
+- [x] `ats_sim` splices `hints.sim_subplan` (`expand_canned`: 8 tasks, makespan 60 s on unlimited workers along t2 -> t2.2 -> t2.join -> t3 -> t4); benchmark workloads unchanged (all 60 rows of `bench/results/sim.csv` reproduce exactly)
+- [x] 26 new tests: 7 graph and subplan, 3 scheduler, 11 atsd with the fake bus (splice and inputs, duplicate and late results, invalid subplans, missing result, both limits, failed subtask, priorities, restart, janitor), 4 simulator, 1 end to end with the real atsd and sim workers
+- [ ] Stretch: speculative execution; E4–E6 overhead profiling
+
+```bash
+./scheduler/build/ats_sim examples/plans/expand_canned.json --workers 0     # splice in the simulator
+```
+
 ## Day 6 gate
 
 - [x] `make bench` regenerates the sim plots
-- [ ] An open-ended request expands at runtime and completes: the worker side is done (the expand task returns a validated subplan); needs Person B's splice in atsd (design doc 8.11), which still logs `subplan_not_spliced` (D34)
+- [x] atsd splices expand results (D53): `expand_canned` runs end to end with the real atsd and sim workers (`worker/tests/test_atsd_e2e.py`)
+- [ ] An open-ended request expands at runtime and completes on real Groq tasks (`make up-llm`, then `POST /requests` with e.g. "Research the top 3 AI chip companies and compare them")

@@ -38,6 +38,9 @@ class ExecutionState {
   std::vector<NodeId> onCompleted(NodeId n);   // returns tasks that became READY, in plan order
   void onRetry(NodeId n);
   std::vector<NodeId> onFailed(NodeId n);      // returns tasks that became CANCELLED
+  // After Dag::expand(e): the appended nodes start WAITING. e must be QUEUED or RUNNING, so the
+  // rewired children still wait for exactly one parent (now the join) and keep their counts.
+  void onExpanded(NodeId e);
 
   TaskState state(NodeId n) const { return states_.at(n); }
   std::size_t unresolved(NodeId n) const { return unresolved_.at(n); }

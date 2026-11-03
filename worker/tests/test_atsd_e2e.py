@@ -357,3 +357,47 @@ def test_janitor_acks_the_dead_workers_entry_after_recovery(redis_url, tmp_path)
             [("req_d5a", "t1", 1, "dead-worker")]
 
     run(body())
+
+
+# --------------------------------------------------------------------------------- Day 6 (Person B)
+
+def test_expand_task_is_spliced_and_its_results_reach_the_dependents(redis_url, tmp_path):
+    """D53 / design doc 8.11 with the real atsd and sim workers: t2 (expand) returns a 2-task
+    subplan; atsd splices t2.1, t2.2 and t2.join, completes t2.join itself, and t3 receives
+    t1's and the spliced tasks' results."""
+
+    async def body():
+        async with Stack(redis_url, tmp_path, workers=3) as s:
+            # The canned subplan's tasks have no duration hint: keep them short.
+            s.workers = [Worker(s.r, WorkerConfig(worker_id=f"w-{i}", block_ms=100, heartbeat_s=0.5,
+                                                  sim_default_seconds=0.05)) for i in range(3)]
+            s.start_workers()
+            await s.submit(plan_file("expand_canned", "req_d6a"))
+            assert await s.wait_status("req_d6a", timeout=20) == "SUCCEEDED"
+
+            status = await s.r.hgetall(keys.request_key("req_d6a"))
+            for tid in ("t1", "t2", "t2.1", "t2.2", "t2.join", "t3", "t4"):
+                assert json.loads(status[f"task:{tid}"])["state"] == "COMPLETED", tid
+            assert json.loads(status["task:t2.join"])["attempt"] == 0  # never dispatched
+
+            messages = {json.loads(f[STREAM_FIELD])["task_id"]: json.loads(f[STREAM_FIELD])
+                        for _, f in await s.r.xrange("tasks:sim")}
+            assert "t2.join" not in messages
+            assert messages["t2.1"]["inputs"] == {"t2": result_key("req_d6a", "t2")}
+            assert messages["t3"]["inputs"] == {t: result_key("req_d6a", t) for t in ("t1", "t2.1", "t2.2")}
+            t3 = json.loads(await s.r.get(result_key("req_d6a", "t3")))
+            assert t3["inputs"] == ["t1", "t2.1", "t2.2"]  # the worker loaded every spliced result
+
+            ended = {e.attempt_id.split(":")[1]: e.ts_ms for e in await s.events("req_d6a")
+                     if e.event == "task_completed"}
+            started = {e.attempt_id.split(":")[1]: e.ts_ms for e in await s.events("req_d6a")
+                       if e.event == "task_started"}
+            assert started["t2.1"] >= ended["t2"] and started["t2.2"] >= ended["t2"]
+            assert started["t3"] >= max(ended["t1"], ended["t2.1"], ended["t2.2"])
+        assert "1 expansions (2 tasks spliced, 0 rejected)" in s.atsd_log
+        log = [json.loads(line) for line in (next((tmp_path / "runs").iterdir()) / "events.jsonl").read_text().splitlines()]
+        expanded = [e for e in log if e["event"] == "graph_expanded"]
+        assert [e["detail"] for e in expanded] == ["2 tasks: t2.1, t2.2; t2.join -> t3"]
+        assert any(e["event"] == "join_completed" and e["task"] == "t2.join" for e in log)
+
+    run(body())

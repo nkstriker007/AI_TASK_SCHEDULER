@@ -142,7 +142,8 @@ int main(int argc, char** argv) {
     std::cerr << "atsd: stopped | requests " << s.ingested << " (" << s.succeeded << " succeeded, " << s.failed
               << " failed, " << s.rejected << " rejected, " << service.activeRequests() << " unfinished) | "
               << s.dispatched << " dispatches, " << s.retries << " retries, " << s.lostAttempts << " lost attempts, "
-              << s.duplicateCompletions << " duplicate completions, " << s.janitorAcked
+              << s.duplicateCompletions << " duplicate completions, " << s.expansions << " expansions ("
+              << s.splicedTasks << " tasks spliced, " << s.rejectedExpansions << " rejected), " << s.janitorAcked
               << " dead pending entries acknowledged\n";
     return 0;
   } catch (const std::exception& e) {

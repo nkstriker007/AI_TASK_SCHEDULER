@@ -54,6 +54,8 @@ nlohmann::json toJson(const ats::Dag& g, const ats::SimReport& r) {
   for (auto n : r.criticalPath) cp.push_back(g.id(n));
   return {{"request_id", g.requestId()},
           {"tasks", g.size()},
+          {"expansions", r.expansions},
+          {"spliced_tasks", r.splicedTasks},
           {"policy", r.policy},
           {"workers", r.workers},
           {"makespan", r.makespan},
@@ -76,7 +78,11 @@ nlohmann::json toJson(const ats::Dag& g, const ats::SimReport& r) {
 
 void printText(const ats::Dag& g, const ats::SimReport& r) {
   std::cout << "plan " << g.requestId() << ": " << g.size() << " tasks | policy " << r.policy << " | workers "
-            << (r.workers == 0 ? std::string("unlimited") : std::to_string(r.workers)) << "\n";
+            << (r.workers == 0 ? std::string("unlimited") : std::to_string(r.workers))
+            << (r.expansions ? " | " + std::to_string(r.expansions) + " expansion(s), " +
+                                   std::to_string(r.splicedTasks) + " tasks spliced"
+                             : std::string())
+            << "\n";
   std::map<double, std::string> lines;  // one line per instant, events in order
   for (const auto& e : r.events) {
     std::string& line = lines[e.time];
@@ -164,11 +170,12 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (asJson) {
-    nlohmann::json out = toJson(*dag, report);
+    const ats::Dag& final = report.graph ? *report.graph : *dag;  // with any spliced subplans (D53)
+    nlohmann::json out = toJson(final, report);
     out["valid"] = true;
     std::cout << out.dump(2) << "\n";
   } else {
-    printText(*dag, report);
+    printText(report.graph ? *report.graph : *dag, report);
   }
   return report.succeeded ? 0 : 2;
 }

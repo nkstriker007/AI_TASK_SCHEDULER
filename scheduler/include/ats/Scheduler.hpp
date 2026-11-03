@@ -44,6 +44,9 @@ class Scheduler {
   std::vector<NodeId> complete(NodeId n);
   void retry(NodeId n);
   std::vector<NodeId> fail(NodeId n);
+  // After Dag::expand(e) on this scheduler's graph (e QUEUED or RUNNING): grow the state and
+  // re-rank the ready set with `priorities` (one per task). Then complete(e) releases the subplan.
+  void onExpanded(NodeId e, std::vector<double> priorities);
 
   bool hasReady() const { return !policy_->empty(); }
   std::size_t readyCount() const { return policy_->size(); }

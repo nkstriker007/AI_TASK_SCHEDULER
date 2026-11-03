@@ -54,14 +54,16 @@ struct Running {
 
 }  // namespace
 
-SimReport simulate(const Dag& dag, const SimConfig& cfg) {
+SimReport simulate(const Dag& input, const SimConfig& cfg) {
   if (cfg.workers < 0) throw std::invalid_argument("workers must be >= 0 (0 = unlimited)");
   if (cfg.jitter < 0.0 || cfg.jitter >= 1.0) throw std::invalid_argument("jitter must be in [0, 1)");
   for (const auto& set : {cfg.failTaskIds, cfg.flakyTaskIds})
-    for (const auto& id : set)
-      if (!dag.find(id)) throw std::invalid_argument("unknown task id in fault injection: " + id);
+    for (const auto& id : set)  // spliced ids (t2.1) do not exist yet, so they are not checked
+      if (!input.find(id) && id.find('.') == std::string::npos)
+        throw std::invalid_argument("unknown task id in fault injection: " + id);
 
-  const std::vector<double> base = estimatedDurations(dag, cfg.defaultSeconds);
+  Dag dag = input;  // grows when an expand task with hints.sim_subplan completes; must not move
+  std::vector<double> base = estimatedDurations(dag, cfg.defaultSeconds);
   auto duration = [&](NodeId n, int attempt) { return base[n] * jitterFactor(cfg.seed, n, attempt, cfg.jitter); };
 
   std::vector<double> firstAttempt(dag.size());
@@ -71,10 +73,6 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
   SimReport r;
   r.policy = std::string(sched.policy().name());
   r.workers = cfg.workers;
-  for (double d : firstAttempt) r.sequentialSeconds += d;
-  const CriticalPath cp = criticalPath(dag, firstAttempt);
-  r.criticalPathSeconds = cp.seconds;
-  r.criticalPath = cp.path;
 
   const bool unlimited = cfg.workers == 0;
   std::set<int> freeWorkers;  // lowest id first, so worker numbering is stable
@@ -85,8 +83,15 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
 
   sched.start();
   while (true) {
-    // 1. Fill every free worker with the policy's next choice.
-    while (sched.hasReady() && (unlimited || !freeWorkers.empty())) {
+    // 1. Fill every free worker with the policy's next choice. A join node needs no worker.
+    while (sched.hasReady()) {
+      if (auto head = sched.peekNext(); head && dag.isJoin(*head)) {
+        auto j = sched.dispatchNext();
+        sched.complete(j->node);
+        r.events.push_back({now, SimEventKind::Complete, j->node, -1, j->attempt});
+        continue;
+      }
+      if (!unlimited && freeWorkers.empty()) break;
       auto d = sched.dispatchNext();
       if (!d) break;
       int worker;
@@ -110,7 +115,7 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
       running.pop();
       if (!unlimited) freeWorkers.insert(e.worker);
       r.busySeconds += e.end - e.start;
-      const std::string& id = dag.id(e.node);
+      const std::string id = dag.id(e.node);  // a copy: expand() below may reallocate the tasks
 
       SimEventKind outcome;
       if (cfg.failTaskIds.count(id)) {
@@ -125,6 +130,17 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
       } else {
         outcome = SimEventKind::Complete;
         r.events.push_back({now, outcome, e.node, e.worker, e.attempt});
+        if (dag.task(e.node).type == TaskType::Expand && !dag.task(e.node).simSubplan.empty()) {
+          const std::vector<TaskSpec> subplan = dag.task(e.node).simSubplan;  // copied before the graph grows
+          const DagExpandResult x = dag.expand(e.node, subplan);
+          if (!x.ok()) throw std::logic_error("sim_subplan of " + id + " cannot be spliced: " + x.issues.front().message);
+          base = estimatedDurations(dag, cfg.defaultSeconds);
+          firstAttempt.resize(dag.size());
+          for (NodeId n = x.added.front(); n < dag.size(); ++n) firstAttempt[n] = duration(n, 1);
+          sched.onExpanded(e.node, bottomLevels(dag, firstAttempt));
+          ++r.expansions;
+          r.splicedTasks += x.added.size();
+        }
         sched.complete(e.node);
       }
       r.attempts.push_back({e.node, e.worker, e.attempt, e.start, e.end, outcome});
@@ -132,6 +148,10 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
   }
 
   if (!sched.isDone()) throw std::logic_error("simulation stalled with unfinished tasks");
+  for (double d : firstAttempt) r.sequentialSeconds += d;  // on the final graph (joins take 0 s)
+  const CriticalPath cp = criticalPath(dag, firstAttempt);
+  r.criticalPathSeconds = cp.seconds;
+  r.criticalPath = cp.path;
   const ExecutionState& st = sched.state();
   r.completed = st.count(TaskState::Completed);
   r.failed = st.count(TaskState::Failed);
@@ -146,6 +166,7 @@ SimReport simulate(const Dag& dag, const SimConfig& cfg) {
     r.utilization = r.busySeconds / (capacity * r.makespan);
   }
   if (r.criticalPathSeconds > 0.0) r.maxSpeedup = r.sequentialSeconds / r.criticalPathSeconds;
+  r.graph = dag;
   return r;
 }
 
