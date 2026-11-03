@@ -172,7 +172,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D49)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D52)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -199,7 +199,7 @@ worker/                          Python worker (Person A, Day 3)
   worker/redis_client.py         Redis connection that survives a Redis restart
   worker/faults.py               fault injection for sim tasks: error, 429, hang, crash, straggler (D46)
   worker/executors/              Executor interface + error classes; sim executor; Groq LLM executor (llm.py)
-  worker/prompts/                executor prompts: common rules, one file per task type, output format
+  worker/prompts/                executor prompts: common rules, one file per task type, output format, subplan (expand step 2)
   worker/minisched.py            Python stand-in for atsd, for testing only (D26)
   Dockerfile, tests/
 api/                             FastAPI service (Person A, Day 3)
@@ -219,6 +219,12 @@ scheduler/                       C++20 runtime (Person B)
   Dockerfile                     atsd image
 tests/parity.py                  C++ and Python validators vs expected_validation.json (make parity)
 tests/test_parity.py             Python validator vs C++ (ats_sim), schema freshness
+bench/                           benchmarks, design doc 11 (Person A, Day 6)
+  bench/gen.py                   workloads as plan files -> bench/workloads/
+  bench/sim.py                   ats_sim sweep: workloads x workers x policies -> results/sim.csv
+  bench/run.py                   E1-E3 with the real atsd + Redis + sim workers -> results/dist.csv
+  bench/analyze.py               plots and summary.md from the CSVs -> bench/results/
+  tests/
 scripts/chaos.py                 chaos run against the Docker stack: submit, kill workers, check (make chaos)
 docker-compose.yml               redis, atsd, api, worker (3 replicas), minisched (profile)
 ```
@@ -349,3 +355,26 @@ ATSD_CAPABILITY=sim ATSD_SIM_MAX_INFLIGHT=2 ATSD_POLICY=fifo ./scheduler/build/a
 Open items:
 
 - [ ] Person B: review the atsd changes made from Person A's side: D39 (capability pause on `retry_after_ms`) and D45 (doubling LLM backoff)
+
+## Day 6 status: Person A
+
+- [x] Expand executor (D50): step 1 names the items, step 2 turns them into a `Subplan` (`worker/prompts/subplan.md`), checked with `validate_subplan` and an item-coverage check, repaired once, then a permanent failure. Live check: "top chip companies" → 5 independent research subtasks (NVIDIA, AMD, Intel, Qualcomm, Google)
+- [x] Planner rule 2 and eval (D52): open-ended requests plan as expand → compare → report with no placeholder tasks; 3 open-ended eval cases, new assertions `require_types`, `expand_reaches_sink`, `expand_consumed_once`; eval 8/8 live
+- [x] Benchmarks (D51): `bench/gen.py`, `sim.py`, `run.py`, `analyze.py`, tests in `bench/tests/` (part of `make py-test`)
+
+```bash
+make bench          # workloads -> ats_sim sweep -> bench/results/sim_scaling.png, summary.md (seconds, no Redis)
+make bench-dist     # + E1-E3 with the real atsd, a throwaway redis-server and sim workers (~1 min)
+```
+
+First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
+
+- E1, distributed vs simulator on 4 workers: +1.4 % (straggler-16) to +4.0 % (fanout-32)
+- E2, speedup over a measured 1-worker run, tracks the simulator within 4 %: fanout-32 10.6x at 16 workers (sim 11.0x), layered-24 3.2x (bound 3.25x), chain-10 1.0x
+- E3, 32 tasks + join on 8 workers: 3–6 ms overhead per step; efficiency 40 % at 2 ms tasks, 92 % at 50 ms, 99 % at 0.5 s; break-even about 3 ms
+- Simulator: critical-path priority beats FIFO on straggler-16 (22 s vs 28 s on 4 workers) and layered-24 (18.4 s vs 19.5 s); identical on the others
+
+## Day 6 gate
+
+- [x] `make bench` regenerates the sim plots
+- [ ] An open-ended request expands at runtime and completes: the worker side is done (the expand task returns a validated subplan); needs Person B's splice in atsd (design doc 8.11), which still logs `subplan_not_spliced` (D34)

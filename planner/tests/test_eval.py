@@ -68,7 +68,10 @@ def test_check_rejects_unknown_assertion():
 
 def test_eval_cases_file():
     cases = ev.load_cases()
-    assert set(cases) == {"two_companies", "four_companies", "mostly_sequential", "document_batch", "trivial"}
+    assert set(cases) == {"two_companies", "four_companies", "mostly_sequential", "document_batch", "trivial",
+                          "top_chip_companies", "largest_cloud_providers", "trending_databases"}
+    open_ended = [c for c in cases.values() if "expand" in c["expect"].get("require_types", [])]
+    assert len(open_ended) == 3 and all(c["expect"]["expand_reaches_sink"] for c in open_ended)
     assert all(c["request"].strip() for c in cases.values())
 
 
@@ -97,3 +100,32 @@ def test_main_offline(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "PASS  two_companies" in stdout and "FAIL  trivial" in stdout and "1/2 cases passed" in stdout
     assert [r["name"] for r in json.loads(out.read_text())] == ["two_companies", "trivial"]
+
+
+def test_require_types_and_expand_reaches_sink():
+    good = tasks(("t1", "research", []), ("t2", "expand", []), ("t3", "compare", ["t1", "t2"]),
+                 ("t4", "report", ["t3"]))
+    assert ev.check({"require_types": ["expand"], "expand_reaches_sink": True}, good) == []
+
+    no_expand = plan("company_research")
+    assert ev.check({"require_types": ["expand"]}, no_expand) == ["require_types: no expand task"]
+
+    dangling = tasks(("t1", "research", []), ("t2", "expand", []), ("t3", "report", ["t1"]))
+    assert ev.check({"expand_reaches_sink": True}, dangling)[0].startswith("expand_reaches_sink: t2")
+    expand_is_sink = tasks(("t1", "expand", []))
+    assert ev.check({"expand_reaches_sink": True}, expand_is_sink)  # nothing consumes what it spawns
+
+
+def test_expand_consumed_once_catches_per_item_placeholders():
+    placeholders = tasks(("t1", "expand", []), ("t2", "research", ["t1"]), ("t3", "research", ["t1"]),
+                         ("t4", "compare", ["t2", "t3"]))
+    assert ev.check({"expand_consumed_once": True}, placeholders)[0].startswith("expand_consumed_once: t1 has 2")
+    good = tasks(("t1", "expand", []), ("t2", "compare", ["t1"]), ("t3", "report", ["t2"]))
+    assert ev.check({"expand_consumed_once": True}, good) == []
+
+
+def test_independent_accepts_a_list_of_types():
+    p = tasks(("t1", "summarize", []), ("t2", "research", []), ("t3", "compare", ["t1", "t2"]))
+    assert ev.max_independent(p, "research") == 1
+    assert ev.max_independent(p, ["research", "summarize"]) == 2
+    assert ev.check({"independent": {"type": ["research", "summarize"], "min": 2}}, p) == []

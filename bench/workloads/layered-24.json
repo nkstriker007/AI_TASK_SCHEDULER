@@ -1,0 +1,315 @@
+{
+  "request_id": "bench_layered-24",
+  "created_at": "2026-11-03T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "random DAG, 6 levels of 4, skewed durations",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "research 1",
+        "instruction": "Synthetic research task 1.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.2723
+        }
+      },
+      {
+        "id": "t2",
+        "type": "research",
+        "title": "research 2",
+        "instruction": "Synthetic research task 2.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 1.1651
+        }
+      },
+      {
+        "id": "t3",
+        "type": "research",
+        "title": "research 3",
+        "instruction": "Synthetic research task 3.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 5.6367
+        }
+      },
+      {
+        "id": "t4",
+        "type": "research",
+        "title": "research 4",
+        "instruction": "Synthetic research task 4.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 1.6092
+        }
+      },
+      {
+        "id": "t5",
+        "type": "research",
+        "title": "research 5",
+        "instruction": "Synthetic research task 5.",
+        "depends_on": [
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 1.8377
+        }
+      },
+      {
+        "id": "t6",
+        "type": "research",
+        "title": "research 6",
+        "instruction": "Synthetic research task 6.",
+        "depends_on": [
+          "t4"
+        ],
+        "hints": {
+          "estimated_seconds": 0.6371
+        }
+      },
+      {
+        "id": "t7",
+        "type": "research",
+        "title": "research 7",
+        "instruction": "Synthetic research task 7.",
+        "depends_on": [
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 2.8971
+        }
+      },
+      {
+        "id": "t8",
+        "type": "research",
+        "title": "research 8",
+        "instruction": "Synthetic research task 8.",
+        "depends_on": [
+          "t2"
+        ],
+        "hints": {
+          "estimated_seconds": 5.2809
+        }
+      },
+      {
+        "id": "t9",
+        "type": "research",
+        "title": "research 9",
+        "instruction": "Synthetic research task 9.",
+        "depends_on": [
+          "t8"
+        ],
+        "hints": {
+          "estimated_seconds": 4.1801
+        }
+      },
+      {
+        "id": "t10",
+        "type": "research",
+        "title": "research 10",
+        "instruction": "Synthetic research task 10.",
+        "depends_on": [
+          "t5",
+          "t6"
+        ],
+        "hints": {
+          "estimated_seconds": 0.7261
+        }
+      },
+      {
+        "id": "t11",
+        "type": "research",
+        "title": "research 11",
+        "instruction": "Synthetic research task 11.",
+        "depends_on": [
+          "t6",
+          "t7"
+        ],
+        "hints": {
+          "estimated_seconds": 1.2987
+        }
+      },
+      {
+        "id": "t12",
+        "type": "research",
+        "title": "research 12",
+        "instruction": "Synthetic research task 12.",
+        "depends_on": [
+          "t6",
+          "t8"
+        ],
+        "hints": {
+          "estimated_seconds": 0.9254
+        }
+      },
+      {
+        "id": "t13",
+        "type": "research",
+        "title": "research 13",
+        "instruction": "Synthetic research task 13.",
+        "depends_on": [
+          "t10"
+        ],
+        "hints": {
+          "estimated_seconds": 1.9538
+        }
+      },
+      {
+        "id": "t14",
+        "type": "research",
+        "title": "research 14",
+        "instruction": "Synthetic research task 14.",
+        "depends_on": [
+          "t10",
+          "t12"
+        ],
+        "hints": {
+          "estimated_seconds": 2.408
+        }
+      },
+      {
+        "id": "t15",
+        "type": "research",
+        "title": "research 15",
+        "instruction": "Synthetic research task 15.",
+        "depends_on": [
+          "t10"
+        ],
+        "hints": {
+          "estimated_seconds": 1.5474
+        }
+      },
+      {
+        "id": "t16",
+        "type": "research",
+        "title": "research 16",
+        "instruction": "Synthetic research task 16.",
+        "depends_on": [
+          "t10",
+          "t11"
+        ],
+        "hints": {
+          "estimated_seconds": 1.8035
+        }
+      },
+      {
+        "id": "t17",
+        "type": "research",
+        "title": "research 17",
+        "instruction": "Synthetic research task 17.",
+        "depends_on": [
+          "t14",
+          "t16"
+        ],
+        "hints": {
+          "estimated_seconds": 2.3115
+        }
+      },
+      {
+        "id": "t18",
+        "type": "research",
+        "title": "research 18",
+        "instruction": "Synthetic research task 18.",
+        "depends_on": [
+          "t14",
+          "t16"
+        ],
+        "hints": {
+          "estimated_seconds": 1.8518
+        }
+      },
+      {
+        "id": "t19",
+        "type": "research",
+        "title": "research 19",
+        "instruction": "Synthetic research task 19.",
+        "depends_on": [
+          "t13"
+        ],
+        "hints": {
+          "estimated_seconds": 0.9626
+        }
+      },
+      {
+        "id": "t20",
+        "type": "research",
+        "title": "research 20",
+        "instruction": "Synthetic research task 20.",
+        "depends_on": [
+          "t13",
+          "t14"
+        ],
+        "hints": {
+          "estimated_seconds": 8.6215
+        }
+      },
+      {
+        "id": "t21",
+        "type": "research",
+        "title": "research 21",
+        "instruction": "Synthetic research task 21.",
+        "depends_on": [
+          "t17"
+        ],
+        "hints": {
+          "estimated_seconds": 3.3398
+        }
+      },
+      {
+        "id": "t22",
+        "type": "research",
+        "title": "research 22",
+        "instruction": "Synthetic research task 22.",
+        "depends_on": [
+          "t17",
+          "t19"
+        ],
+        "hints": {
+          "estimated_seconds": 1.2477
+        }
+      },
+      {
+        "id": "t23",
+        "type": "research",
+        "title": "research 23",
+        "instruction": "Synthetic research task 23.",
+        "depends_on": [
+          "t19"
+        ],
+        "hints": {
+          "estimated_seconds": 1.8465
+        }
+      },
+      {
+        "id": "t24",
+        "type": "research",
+        "title": "research 24",
+        "instruction": "Synthetic research task 24.",
+        "depends_on": [
+          "t17",
+          "t18"
+        ],
+        "hints": {
+          "estimated_seconds": 1.4446
+        }
+      },
+      {
+        "id": "t25",
+        "type": "report",
+        "title": "report 25",
+        "instruction": "Synthetic report task 25.",
+        "depends_on": [
+          "t21",
+          "t22",
+          "t23",
+          "t24"
+        ],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      }
+    ]
+  }
+}

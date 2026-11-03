@@ -6,7 +6,7 @@
 #   min_depth / max_depth     number of levels
 #   single_sink: true         exactly one task has no dependents (the final answer)
 #   sink_type: <type>         ... and it has this type
-#   independent: {type, min}  at least `min` tasks of `type` with no dependency path between any two
+#   independent: {type, min}  at least `min` tasks of `type` (a type or a list) with no dependency path between any two
 #   forbid_types: [...]       task types that must not appear
 
 cases:
@@ -15,7 +15,8 @@ cases:
       Research Apple and NVIDIA, summarize the key recent developments for each,
       compare the two companies, and write a short report.
     expect:
-      independent: {type: research, min: 2}
+      # per-company work in parallel; the planner may gather facts as research or summarize (rule 9)
+      independent: {type: [research, summarize], min: 2}
       min_width: 2
       single_sink: true
 
@@ -55,3 +56,36 @@ cases:
     expect:
       max_tasks: 2
       single_sink: true
+
+  # Open-ended (Day 6): the items are not in the request, so the plan should discover them at
+  # runtime with an expand task whose results reach the final answer (design doc 8.11, E8).
+  top_chip_companies:
+    request: >-
+      Research the top 5 AI chip companies by 2025 revenue and write a report comparing them.
+    expect:
+      require_types: [expand]
+      expand_reaches_sink: true
+      expand_consumed_once: true
+      single_sink: true
+      max_tasks: 8
+
+  largest_cloud_providers:
+    request: >-
+      Find the three largest cloud providers, summarize each one's AI strategy, and write a
+      short comparison.
+    expect:
+      require_types: [expand]
+      expand_reaches_sink: true
+      expand_consumed_once: true
+      single_sink: true
+
+  trending_databases:
+    request: >-
+      Identify the most widely used open-source vector databases and write a short guide to
+      choosing between them.
+    expect:
+      require_types: [expand]
+      expand_reaches_sink: true
+      expand_consumed_once: true
+      single_sink: true
+

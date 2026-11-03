@@ -29,6 +29,7 @@ from .schema import ExecutionPlan
 ASSERTIONS = {
     "min_tasks", "max_tasks", "min_width", "max_width", "min_depth", "max_depth",
     "single_sink", "sink_type", "independent", "forbid_types",
+    "require_types", "expand_reaches_sink", "expand_consumed_once",
 }
 
 
@@ -91,11 +92,12 @@ def _ancestors(plan: ExecutionPlan) -> dict[str, set[str]]:
     return {tid: anc(tid) for tid in parents}
 
 
-def max_independent(plan: ExecutionPlan, task_type: str) -> int:
-    """Largest set of `task_type` tasks with no dependency path between any two
-    (a maximum antichain). By Dilworth's theorem this is n minus a maximum
-    matching in the reachability graph; plans have at most 50 tasks."""
-    nodes = [t.id for t in plan.tasks if t.type.value == task_type]
+def max_independent(plan: ExecutionPlan, task_type: str | list[str]) -> int:
+    """Largest set of tasks of `task_type` (one type or a list) with no dependency path between
+    any two (a maximum antichain). By Dilworth's theorem this is n minus a maximum matching in
+    the reachability graph; plans have at most 50 tasks."""
+    types = {task_type} if isinstance(task_type, str) else set(task_type)
+    nodes = [t.id for t in plan.tasks if t.type.value in types]
     anc = _ancestors(plan)
     succ = {u: [v for v in nodes if u in anc[v]] for u in nodes}  # u reaches v
     match: dict[str, str] = {}  # right node -> left node
@@ -150,6 +152,28 @@ def check(expect: dict[str, Any], plan: ExecutionPlan) -> list[str]:
         used = [tid for tid, ty in m.types.items() if ty == forbidden]
         if used:
             failures.append(f"forbid_types: {forbidden} used by {used}")
+    for required in expect.get("require_types", []):
+        if required not in m.types.values():
+            failures.append(f"require_types: no {required} task")
+    if expect.get("expand_reaches_sink"):
+        # Whatever an expand task spawns reaches its dependents (8.11), so the final answer only
+        # uses it if every sink has the expand task among its ancestors.
+        ancestors = _ancestors(plan)
+        for e in (tid for tid, ty in m.types.items() if ty == "expand"):
+            unreached = [s for s in m.sinks if e not in ancestors[s] and s != e]
+            if unreached or e in m.sinks:
+                failures.append(f"expand_reaches_sink: {e} does not feed the final task(s) {unreached or [e]}")
+    if expect.get("expand_consumed_once"):
+        # An expand task spawns the per-item tasks itself (8.11); its results should go to one
+        # combining task. Several direct dependents are placeholders for work it already does.
+        children: dict[str, list[str]] = {t.id: [] for t in plan.tasks}
+        for t in plan.tasks:
+            for d in t.depends_on:
+                children[d].append(t.id)
+        for e in (tid for tid, ty in m.types.items() if ty == "expand"):
+            if len(children[e]) > 1:
+                failures.append(f"expand_consumed_once: {e} has {len(children[e])} direct dependents "
+                                f"{children[e]} (per-item placeholders?)")
     return failures
 
 

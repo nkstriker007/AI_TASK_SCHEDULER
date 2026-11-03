@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo e2e chaos up up-llm down clean redis-deps redis-spike redis-up redis-down
+.PHONY: build test cpp-test py-test parity demo e2e chaos bench bench-dist up up-llm down clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -18,6 +18,7 @@ py-test:
 	cd worker && uv run pytest
 	cd api && uv run pytest
 	uv run --project planner pytest tests/test_parity.py
+	cd bench && uv run pytest
 
 parity: build
 	uv run --project planner python tests/parity.py
@@ -70,6 +71,16 @@ LLM_ATTEMPTS ?= 6
 up-llm:
 	ATSD_CAPABILITY=llm WORKER_CAPABILITIES=llm WORKER_CONCURRENCY=2 \
 	ATSD_LLM_MAX_INFLIGHT=$(LLM_INFLIGHT) ATSD_MAX_ATTEMPTS=$(LLM_ATTEMPTS) docker compose up -d --build --wait
+
+# Benchmarks (design doc 11). make bench: workloads -> ats_sim sweep -> sim plots, in seconds,
+# no Redis needed. make bench-dist: E1-E3 with the real atsd, a throwaway redis-server and
+# in-process sim workers (about a minute), then the plots again with the measured results.
+# Output: bench/results/ (CSVs, PNGs, summary.md).
+bench: build
+	cd bench && uv run python -m bench.gen && uv run python -m bench.sim && uv run python -m bench.analyze
+
+bench-dist: bench
+	cd bench && uv run python -m bench.run $(if $(REPEATS),--repeats $(REPEATS),) && uv run python -m bench.analyze
 
 down:
 	docker compose --profile minisched down

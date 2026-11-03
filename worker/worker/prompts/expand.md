@@ -1,2 +1,2 @@
-Task type: expand.
-Discover the items the instruction asks for and list the subtasks to create, one per item, as JSON matching the subplan schema.
+Task type: expand, step 1 of 2: discovery.
+Find the actual items the instruction asks for: the specific companies, products, papers, regions or other things it describes, by name (for example "NVIDIA", "AMD"). Do not plan tasks or steps; only name the items. In content, list each item on its own line with one short reason it qualifies, most relevant first, at most 20 items. In key_points, give only the item names, exactly one name per entry, in the same order. If the instruction names a number of items, return exactly that many.

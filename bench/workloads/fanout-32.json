@@ -1,0 +1,373 @@
+{
+  "request_id": "bench_fanout-32",
+  "created_at": "2026-11-03T00:00:00Z",
+  "plan": {
+    "schema_version": 1,
+    "summary": "32 independent tasks and a join",
+    "tasks": [
+      {
+        "id": "t1",
+        "type": "research",
+        "title": "research 1",
+        "instruction": "Synthetic research task 1.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t2",
+        "type": "research",
+        "title": "research 2",
+        "instruction": "Synthetic research task 2.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t3",
+        "type": "research",
+        "title": "research 3",
+        "instruction": "Synthetic research task 3.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t4",
+        "type": "research",
+        "title": "research 4",
+        "instruction": "Synthetic research task 4.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t5",
+        "type": "research",
+        "title": "research 5",
+        "instruction": "Synthetic research task 5.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t6",
+        "type": "research",
+        "title": "research 6",
+        "instruction": "Synthetic research task 6.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t7",
+        "type": "research",
+        "title": "research 7",
+        "instruction": "Synthetic research task 7.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t8",
+        "type": "research",
+        "title": "research 8",
+        "instruction": "Synthetic research task 8.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t9",
+        "type": "research",
+        "title": "research 9",
+        "instruction": "Synthetic research task 9.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t10",
+        "type": "research",
+        "title": "research 10",
+        "instruction": "Synthetic research task 10.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t11",
+        "type": "research",
+        "title": "research 11",
+        "instruction": "Synthetic research task 11.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t12",
+        "type": "research",
+        "title": "research 12",
+        "instruction": "Synthetic research task 12.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t13",
+        "type": "research",
+        "title": "research 13",
+        "instruction": "Synthetic research task 13.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t14",
+        "type": "research",
+        "title": "research 14",
+        "instruction": "Synthetic research task 14.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t15",
+        "type": "research",
+        "title": "research 15",
+        "instruction": "Synthetic research task 15.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t16",
+        "type": "research",
+        "title": "research 16",
+        "instruction": "Synthetic research task 16.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t17",
+        "type": "research",
+        "title": "research 17",
+        "instruction": "Synthetic research task 17.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t18",
+        "type": "research",
+        "title": "research 18",
+        "instruction": "Synthetic research task 18.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t19",
+        "type": "research",
+        "title": "research 19",
+        "instruction": "Synthetic research task 19.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t20",
+        "type": "research",
+        "title": "research 20",
+        "instruction": "Synthetic research task 20.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t21",
+        "type": "research",
+        "title": "research 21",
+        "instruction": "Synthetic research task 21.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t22",
+        "type": "research",
+        "title": "research 22",
+        "instruction": "Synthetic research task 22.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t23",
+        "type": "research",
+        "title": "research 23",
+        "instruction": "Synthetic research task 23.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t24",
+        "type": "research",
+        "title": "research 24",
+        "instruction": "Synthetic research task 24.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t25",
+        "type": "research",
+        "title": "research 25",
+        "instruction": "Synthetic research task 25.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t26",
+        "type": "research",
+        "title": "research 26",
+        "instruction": "Synthetic research task 26.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t27",
+        "type": "research",
+        "title": "research 27",
+        "instruction": "Synthetic research task 27.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t28",
+        "type": "research",
+        "title": "research 28",
+        "instruction": "Synthetic research task 28.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t29",
+        "type": "research",
+        "title": "research 29",
+        "instruction": "Synthetic research task 29.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t30",
+        "type": "research",
+        "title": "research 30",
+        "instruction": "Synthetic research task 30.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t31",
+        "type": "research",
+        "title": "research 31",
+        "instruction": "Synthetic research task 31.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t32",
+        "type": "research",
+        "title": "research 32",
+        "instruction": "Synthetic research task 32.",
+        "depends_on": [],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      },
+      {
+        "id": "t33",
+        "type": "report",
+        "title": "report 33",
+        "instruction": "Synthetic report task 33.",
+        "depends_on": [
+          "t1",
+          "t2",
+          "t3",
+          "t4",
+          "t5",
+          "t6",
+          "t7",
+          "t8",
+          "t9",
+          "t10",
+          "t11",
+          "t12",
+          "t13",
+          "t14",
+          "t15",
+          "t16",
+          "t17",
+          "t18",
+          "t19",
+          "t20",
+          "t21",
+          "t22",
+          "t23",
+          "t24",
+          "t25",
+          "t26",
+          "t27",
+          "t28",
+          "t29",
+          "t30",
+          "t31",
+          "t32"
+        ],
+        "hints": {
+          "estimated_seconds": 2.0
+        }
+      }
+    ]
+  }
+}
