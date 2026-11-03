@@ -5,6 +5,14 @@ A C++ runtime then schedules and executes it in parallel across workers over Red
 The design is in `docs/` (architecture document). The two cross-language contracts are `docs/contract.md`
 (plan files) and `docs/messages.md` (task messages, events and result values), and build-time decisions are in `docs/DECISIONS.md`.
 
+**Start here:** `docs/REPORT.md` (architecture diagram, decisions, results of E1–E8, limitations) and
+`docs/DEMO.md` (the demo script). The fastest look at it running:
+
+```bash
+make build && make up-llm             # Docker: Redis + atsd + API + 3 Groq workers (GROQ_API_KEY in .env)
+make demo-llm REQUEST="Research the top 3 AI chip companies and write a short report comparing them"
+```
+
 ## Quick start (macOS)
 
 Tools:
@@ -172,7 +180,9 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D53)
+docs/REPORT.md                   architecture, decisions, results (E1–E8), limitations
+docs/DEMO.md                     demo / video script
+docs/DECISIONS.md                decisions made during the build (D15, D17–D55)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -223,8 +233,13 @@ bench/                           benchmarks, design doc 11 (Person A, Day 6)
   bench/gen.py                   workloads as plan files -> bench/workloads/
   bench/sim.py                   ats_sim sweep: workloads x workers x policies -> results/sim.csv
   bench/run.py                   E1-E3 with the real atsd + Redis + sim workers -> results/dist.csv
+  bench/sim.py also runs E4      critical path vs FIFO on 100 random layered DAGs -> results/e4.csv
+  bench/e7.py                    E7: real requests, distributed vs sequential agent vs one large call (Groq)
+  bench/e8.py                    E8: open-ended requests, runtime expansion vs a static plan (Groq)
+  bench/live.py                  shared by E7/E8: counting planner, stack API client, atsd event log, cost
   bench/analyze.py               plots and summary.md from the CSVs -> bench/results/
   tests/
+scripts/demo.py                  live demo: request -> plan -> task states updating -> report (make demo-llm)
 scripts/chaos.py                 chaos run against the Docker stack: submit, kill workers, check (make chaos)
 docker-compose.yml               redis, atsd, api, worker (3 replicas), minisched (profile)
 ```
@@ -390,4 +405,24 @@ First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
 
 - [x] `make bench` regenerates the sim plots
 - [x] atsd splices expand results (D53): `expand_canned` runs end to end with the real atsd and sim workers (`worker/tests/test_atsd_e2e.py`)
-- [ ] An open-ended request expands at runtime and completes on real Groq tasks (`make up-llm`, then `POST /requests` with e.g. "Research the top 3 AI chip companies and compare them")
+- [x] **Passed.** Open-ended requests expand at runtime and complete on real Groq tasks (`make up-llm`, `POST /requests`), 3 out of 3:
+  - "Research the top 3 AI chip companies and compare them in a short report": expand → NVIDIA, AMD, Intel spliced as `t1.1…t1.3` + `t1.join` → compare → report; SUCCEEDED in 44 s
+  - "Find the largest cloud providers, research each, and write a comparison report": 5 providers spliced; SUCCEEDED in 109 s through Groq 429 retries (one task on attempt 5)
+  - "Identify the currently trending databases and summarize each in a short report": 5 databases spliced; SUCCEEDED in 42 s
+  - Each returned one final report. The first gate run found a planner placeholder ("Research each AI chip company" next to the compare task) that ran the research twice and left two final tasks; fixed by D54 (`EXPAND_FANOUT` + one repair). Live planner eval after the fix: 8/8 (one case used the repair)
+
+## Day 7 status: Person A
+
+- [x] E7, real requests (`bench/e7.py`, D55): 3 eval requests planned once, then run distributed, by a sequential agent and as one large call. On Groq's 8k tokens/min tier one large call is fastest (4–7 s) and cheapest; distributed beats the sequential agent when the rate limit allows parallel calls (two_companies 10.5 s vs 13.6 s) and both are dominated by 429 backoff when it does not (four_companies 44–50 s); the planner call is 31–52 % of latency on light requests
+- [x] E8, open-ended requests (`bench/e8.py`, D55): runtime expansion vs a static plan with a guessed fan-out. The splice takes 1 ms and adds no planner calls (the expand task's 2 calls cost 1.8–4.7k tokens); with a requested count both modes cover it exactly; with no count expansion found 10 items against 5 guessed (2x tokens, and 3.5x latency through 429s); static plans added discovery tasks whose result cannot change the planned items
+- [x] E4, critical path vs FIFO (`bench/sim.py`, 100 random layered DAGs, simulator): median 4.9–5.3 % shorter makespan with 2–3 workers, ties at 4 (the graph's width)
+- [x] `docs/REPORT.md` (architecture diagram, decisions, E1–E8, limitations), `docs/DEMO.md` (video script), `scripts/demo.py` (`make demo-llm`), `make live-bench`
+- [x] Fixes from the runs: expand subtask titles are item names, not sentences (the shared output format overrode the discovery prompt; expand now has `prompts/output_expand.md`); E7 closes its Groq clients
+- [ ] Re-run one open-ended request live to confirm name-only titles (Groq's 200k tokens/day limit was reached on Day 7)
+- [ ] Demo video (record with `docs/DEMO.md`)
+
+```bash
+make bench                                   # simulator sweep + E4 plots
+make up-llm && make live-bench               # E7 + E8 on real Groq (~30 min on the 8k tokens/min tier)
+make demo-llm REQUEST="Research the top 3 AI chip companies and write a short report comparing them"
+```

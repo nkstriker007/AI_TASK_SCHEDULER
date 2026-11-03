@@ -7,9 +7,12 @@
   e1_overhead.png   distributed vs simulator makespan per workload (E1)    [if dist.csv has E1]
   e2_scaling.png    measured vs simulated speedup per workload (E2)        [if dist.csv has E2]
   e3_efficiency.png efficiency vs task duration, break-even (E3)           [if dist.csv has E3]
+  e4_policy.png     critical-path gain over FIFO on layered-24, 100 seeds (E4, simulator)   [make bench]
+  e7_requests.png   real requests: latency per mode, planner share (E7)    [if e7.csv]
+  e8_expansion.png  open-ended requests: expand vs static plan (E8)        [if e8.csv]
 
-Chart conventions (dataviz guidance): one y-axis per chart, thin 2 px lines, at most two
-series per chart in fixed palette order (blue, then orange; validated for colour-vision
+Chart conventions (dataviz guidance): one y-axis per chart, thin 2 px lines, at most three
+series per chart in fixed palette order (blue, orange, aqua; validated for colour-vision
 deficiency), legends whenever there are two series, text in ink colours, light gridlines.
 summary.md carries every number as a table, so nothing depends on colour alone.
 """
@@ -30,8 +33,9 @@ import matplotlib.pyplot as plt
 
 from .sim import RESULTS_DIR
 
-# Reference palette (light): categorical slots 1-2 and the chart chrome.
-SERIES = ("#2a78d6", "#eb6834")
+# Reference palette (light): categorical slots 1-3 and the chart chrome. Slot 3 is below 3:1
+# contrast on the surface, so every chart that uses it labels its bars with their values.
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a")
 SURFACE, INK, INK_2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 WORKLOAD_ORDER = ("chain-10", "layered-24", "straggler-16", "fanout-32", "tiny-48")
 
@@ -207,6 +211,123 @@ def e3_efficiency(rows: list[dict], out: Path) -> tuple[Path | None, float | Non
 # --- summary -------------------------------------------------------------------------------
 
 
+# --- E4, E7, E8 --------------------------------------------------------------------------------
+
+
+def e4_policy(rows: list[dict], out: Path) -> Path | None:
+    """One dot per seed (jittered), with the median marked, per worker count."""
+    if not rows:
+        return None
+    ws = sorted({int(r["workers"]) for r in rows})
+    top = max(_num(r["gain_pct"]) for r in rows)
+    fig, ax = plt.subplots(figsize=(5.2, 3.1))
+    for i, w in enumerate(ws):
+        gains = sorted(_num(r["gain_pct"]) for r in rows if int(r["workers"]) == w)
+        xs = [i + ((k * 0.6180339) % 1 - 0.5) * 0.5 for k in range(len(gains))]
+        ax.scatter(xs, gains, s=10, color=SERIES[0], alpha=0.45, linewidths=0)
+        med = gains[len(gains) // 2]
+        ax.plot([i - 0.3, i + 0.3], [med, med], color=INK, linewidth=2)
+        wins = sum(g > 0.01 for g in gains)
+        ax.annotate(f"median {med:+.1f}%\nbetter in {wins}/{len(gains)}", (i, top), xytext=(0, 4),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8, color=INK)
+    ax.axhline(0, color=AXIS, linewidth=1)
+    ax.set_xticks(range(len(ws)), [f"{w} workers" for w in ws])
+    ax.set_xlim(-0.5, len(ws) - 0.5)
+    ax.set_ylim(top=top * 1.3)
+    ax.set_ylabel("makespan saved vs FIFO (%)")
+    ax.set_title("E4: critical-path priority vs FIFO, layered-24, 100 random DAGs", loc="left")
+    ax.grid(axis="x", visible=False)
+    fig.tight_layout()
+    return _save(fig, out / "e4_policy.png")
+
+
+E7_MODES = (("distributed", "distributed (plan + parallel)"), ("sequential", "sequential agent (plan + 1 at a time)"),
+            ("single", "single large call"))
+
+
+def e7_requests(rows: list[dict], out: Path) -> Path | None:
+    if not rows:
+        return None
+    cases = list(dict.fromkeys(r["case"] for r in rows))
+    by = {(r["case"], r["mode"]): r for r in rows}
+    fig, ax = plt.subplots(figsize=(6.4, 3.1))
+    width = 0.26
+    for j, (mode, label) in enumerate(E7_MODES):
+        xs = [i + (j - 1) * (width + 0.02) for i in range(len(cases))]
+        vals = [_num(by[(c, mode)]["latency_s"]) if (c, mode) in by else math.nan for c in cases]
+        bars = ax.bar(xs, vals, width=width, color=SERIES[j], label=label)
+        for b, v in zip(bars, vals):
+            if not math.isnan(v):
+                ax.annotate(f"{v:.0f}s", (b.get_x() + b.get_width() / 2, v), xytext=(0, 2), textcoords="offset points",
+                            ha="center", fontsize=7, color=INK)
+        if mode != "single":  # the planner call is part of both plan-based latencies
+            planner = [_num(by[(c, mode)]["planner_s"]) if (c, mode) in by else 0 for c in cases]
+            ax.bar(xs, planner, width=width, color=INK_2, alpha=0.55,
+                   label="planner call (included)" if mode == "distributed" else None)
+    ax.set_xticks(range(len(cases)), [c.replace("_", " ") for c in cases])
+    ax.set_ylabel("end-to-end latency (s)")
+    ax.set_title("E7: real requests on Groq (8k tokens/min tier)", loc="left")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper left", fontsize=7, ncol=2)
+    ax.set_ylim(0, max(_num(r["latency_s"]) for r in rows) * 1.35)
+    fig.tight_layout()
+    return _save(fig, out / "e7_requests.png")
+
+
+def e8_expansion(rows: list[dict], out: Path) -> Path | None:
+    if not rows:
+        return None
+    cases = list(dict.fromkeys(r["case"] for r in rows))
+    by = {(r["case"], r["mode"]): r for r in rows}
+    fig, ax = plt.subplots(figsize=(5.6, 2.9))
+    width = 0.36
+    for j, (mode, label) in enumerate((("static", "static plan (guessed fan-out)"), ("expand", "runtime expansion"))):
+        xs = [i + (j - 0.5) * (width + 0.03) for i in range(len(cases))]
+        vals = [_num(by[(c, mode)]["latency_s"]) if (c, mode) in by else math.nan for c in cases]
+        bars = ax.bar(xs, vals, width=width, color=SERIES[j], label=label)
+        for b, c in zip(bars, cases):
+            r = by.get((c, mode))
+            if r:
+                ax.annotate(f"{_num(r['latency_s']):.0f}s, {r['items']} items", (b.get_x() + b.get_width() / 2,
+                            b.get_height()), xytext=(0, 2), textcoords="offset points", ha="center", fontsize=7, color=INK)
+    ax.set_xticks(range(len(cases)), [c.replace("_", " ") for c in cases])
+    ax.set_ylabel("end-to-end latency (s)")
+    ax.set_title("E8: open-ended requests, static plan vs runtime expansion", loc="left")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper left", fontsize=7)
+    ax.set_ylim(0, max(_num(r["latency_s"]) for r in rows) * 1.35)
+    fig.tight_layout()
+    return _save(fig, out / "e8_expansion.png")
+
+
+def summary_live(e4: list[dict], e7: list[dict], e8: list[dict]) -> str:
+    out: list[str] = []
+    if e4:
+        out += ["## E4: critical-path priority vs FIFO (simulator, layered-24, 100 seeds)", ""]
+        rows = []
+        for w in sorted({int(r["workers"]) for r in e4}):
+            g = sorted(_num(r["gain_pct"]) for r in e4 if int(r["workers"]) == w)
+            rows.append([w, f"{g[len(g) // 2]:+.1f}%", f"{_mean(g):+.1f}%", f"{g[-1]:+.1f}%", f"{g[0]:+.1f}%",
+                         f"{sum(x > 0.01 for x in g)} / {sum(abs(x) <= 0.01 for x in g)} / {sum(x < -0.01 for x in g)}"])
+        out += [_table(["workers", "median saved", "mean", "best", "worst", "better / tie / worse"], rows), ""]
+    if e7:
+        out += ["## E7: real requests (Groq, openai/gpt-oss-120b)", "",
+                _table(["case", "mode", "latency s", "planner s", "planner share", "LLM calls", "tokens in / out",
+                        "cost $", "retries", "answer chars"],
+                       [[r["case"], r["mode"], r["latency_s"], r["planner_s"],
+                         f"{100 * _num(r['planner_share']):.0f}%" if r["mode"] != "single" else "-", r["llm_calls"],
+                         f"{r['tokens_in']} / {r['tokens_out']}", f"{_num(r['cost_usd']):.4f}", r["retries"],
+                         r["output_chars"]] for r in e7]), ""]
+    if e8:
+        out += ["## E8: open-ended requests, static plan vs runtime expansion", "",
+                _table(["case", "mode", "latency s", "items (requested)", "items", "expand task tokens", "splice delay ms",
+                        "tokens in / out", "cost $", "retries"],
+                       [[r["case"], r["mode"], r["latency_s"], f"{r['items']} ({r['requested_items'] or '-'})",
+                         r["item_names"], r.get("expand_tokens", ""), r["splice_delay_ms"] or "-",
+                         f"{r['tokens_in']} / {r['tokens_out']}", f"{_num(r['cost_usd']):.4f}", r["retries"]] for r in e8]), ""]
+    return "\n".join(out)
+
+
 def _table(headers: list[str], rows: list[list]) -> str:
     lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
@@ -260,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     _style()
     sim, dist = _read(a.results / "sim.csv"), _read(a.results / "dist.csv")
+    e4, e7, e8 = _read(a.results / "e4.csv"), _read(a.results / "e7.csv"), _read(a.results / "e8.csv")
     if not sim and not dist:
         raise SystemExit(f"no results in {a.results}: run `python -m bench.sim` (and `python -m bench.run`) first")
     written = []
@@ -271,7 +393,10 @@ def main(argv: list[str] | None = None) -> int:
     e3_path, be = e3_efficiency(dist, a.results)
     if e3_path:
         written.append(e3_path)
-    (a.results / "summary.md").write_text(summary(sim, dist, be) + "\n")
+    for fn, rows in ((e4_policy, e4), (e7_requests, e7), (e8_expansion, e8)):
+        if (p_ := fn(rows, a.results)):
+            written.append(p_)
+    (a.results / "summary.md").write_text(summary(sim, dist, be) + "\n" + summary_live(e4, e7, e8) + "\n")
     for w in written + [a.results / "summary.md"]:
         print(f"wrote {w}")
     return 0

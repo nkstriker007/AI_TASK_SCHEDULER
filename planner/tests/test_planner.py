@@ -67,6 +67,33 @@ def test_repair_feedback_excludes_warnings():
     assert [i.code.value for i in fake.calls[1][1]] == ["DUPLICATE_DEPENDENCY"]
 
 
+def placeholder_after_expand():
+    """The live Day 6 failure: a "research each" placeholder hangs off the expand task as a 2nd sink."""
+    def task(tid, type_, deps):
+        return {"id": tid, "type": type_, "title": f"{type_} {tid}", "instruction": f"Do {tid}.", "depends_on": deps}
+    return {"schema_version": 1, "summary": "top chip companies", "tasks": [
+        task("t1", "expand", []), task("t2", "research", ["t1"]), task("t3", "compare", ["t1"]),
+        task("t4", "report", ["t3"])]}
+
+
+def test_valid_plan_with_repair_warnings_is_repaired_once():
+    fake = FakePlanner(default="expand_canned", script=[placeholder_after_expand()])
+    plan = fake.generate_plan("req")
+    assert fake.last_attempts == 2
+    assert sorted(i.code.value for i in fake.calls[1][1]) == ["EXPAND_FANOUT", "MULTIPLE_SINKS"]
+    assert [t.depends_on for t in plan.tasks][2] == ["t1", "t2"]  # the repaired plan (expand_canned)
+
+
+def test_repair_warnings_never_reject_a_valid_plan():
+    first = placeholder_after_expand()
+    # the repair is still warned about: it is returned
+    fake = FakePlanner(script=[first, placeholder_after_expand()])
+    assert len(fake.generate_plan("req").tasks) == 4 and fake.last_attempts == 2
+    # the repair is invalid: the valid first plan is returned
+    fake = FakePlanner(script=[first, cyclic_plan()])
+    assert [t.id for t in fake.generate_plan("req").tasks] == ["t1", "t2", "t3", "t4"]
+
+
 # --- Groq planner (fake client, no network) -----------------------------------
 
 

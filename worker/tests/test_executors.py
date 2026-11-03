@@ -127,8 +127,13 @@ def test_each_type_has_its_own_prompt():
     for t, text in prompts.items():
         assert f"Task type: {t.value}" in text and "no web access" in text and "key_points" in text
     assert "step 1 of 2: discovery" in prompts[TaskType.expand]
+    # expand's key_points are item names: the shared "one short sentence each" must not reach it
+    assert "one short sentence each" not in prompts[TaskType.expand]
+    assert all("one short sentence each" in prompts[t] for t in TaskType if t != TaskType.expand)
+    assert prompts[TaskType.expand].rstrip().endswith("never a sentence or a description.")
     subplan = load_subplan_prompt()
     assert "step 2 of 2" in subplan and "Never expand" in subplan and "key_points" not in subplan
+    assert "name and nothing else" in subplan  # titles are item names, not sentences (Day 7 E8 run)
 
 
 def test_executor_refuses_a_task_of_another_type():

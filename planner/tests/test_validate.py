@@ -115,6 +115,20 @@ def test_transitive_edge_is_a_warning_and_kept():
     assert result.value.tasks[2].depends_on == ["t1", "t2"]  # never silently removed
 
 
+def test_expand_with_several_dependents_is_a_warning():
+    # live Day 6 plan: "research each" placeholder t2 next to the combining t3 (D54)
+    plan = {"schema_version": 1, "summary": "s",
+            "tasks": [task("t1", type="expand"), task("t2", ["t1"]), task("t3", ["t1"], type="compare"),
+                      task("t4", ["t3"], type="report")]}
+    result = validate_plan(plan)
+    assert result.ok
+    assert codes(result.warnings) == ["EXPAND_FANOUT", "MULTIPLE_SINKS"]
+    assert [i.task_id for i in result.warnings if i.code == IssueCode.EXPAND_FANOUT] == ["t1"]
+    del plan["tasks"][1]
+    plan["tasks"][2]["depends_on"] = ["t3"]
+    assert validate_plan(plan).warnings == []  # expand -> compare -> report
+
+
 def test_non_dict_input():
     assert codes(validate_plan("not a plan").errors) == ["SCHEMA"]
     assert codes(validate_plan_file([]).errors) == ["SCHEMA"]

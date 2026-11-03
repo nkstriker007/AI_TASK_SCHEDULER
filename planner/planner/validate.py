@@ -228,6 +228,7 @@ def _graph_issues(
         issues += _transitive_edge_warnings(ids, parents)
         if sinks_warning:
             issues += _multiple_sinks_warning(ids, parents)
+        issues += _expand_fanout_warnings(tasks, ids, parents)
     return issues
 
 
@@ -315,4 +316,27 @@ def _sim_subplan_issues(tasks: Any) -> list[ValidationIssue]:
                 "task_id": t.get("id", "") if isinstance(t.get("id"), str) else "",
                 "message": f"sim_subplan: {issue.message}",
             }))
+    return issues
+
+
+def _expand_fanout_warnings(tasks: list, ids: list[str], parents: dict[str, list[str]]) -> list[ValidationIssue]:
+    """An expand task creates the per-item tasks itself at runtime (8.11), so its results should go
+    to one combining task. Several direct dependents are usually placeholders for work it already
+    does ("Research each company"), which then runs twice. Python only (D54)."""
+    children: dict[str, list[str]] = {tid: [] for tid in ids}
+    for tid in ids:
+        for p in parents[tid]:
+            children[p].append(tid)
+    issues = []
+    for t in tasks:
+        tid = t.get("id") if isinstance(t, dict) else None
+        if t.get("type") == "expand" and tid in children and len(children[tid]) > 1:
+            issues.append(
+                _warning(
+                    IssueCode.EXPAND_FANOUT,
+                    f"expand task has {len(children[tid])} direct dependents ({', '.join(children[tid])}); it creates "
+                    "the per-item tasks itself at runtime, so only the task that combines them should depend on it",
+                    tid,
+                )
+            )
     return issues

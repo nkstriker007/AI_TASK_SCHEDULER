@@ -104,8 +104,11 @@ def _prompt(name: str) -> str:
 
 def load_executor_prompt(task_type: TaskType) -> str:
     """System prompt for one task type: common rules, the type's section, the output format.
-    For expand this is step 1 (discovery), which answers in the same {content, key_points} format."""
-    return "\n\n".join([_prompt("common"), _prompt(task_type.value), _prompt("output")])
+    For expand this is step 1 (discovery): the same {content, key_points} schema, but key_points are
+    the item names, so it has its own output section. The shared one ("one short sentence each")
+    came last and won, which made the spliced tasks' titles sentences (found in the Day 7 E8 run)."""
+    output = "output_expand" if task_type == TaskType.expand else "output"
+    return "\n\n".join([_prompt("common"), _prompt(task_type.value), _prompt(output)])
 
 
 def load_subplan_prompt() -> str:

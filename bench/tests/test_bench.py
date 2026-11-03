@@ -77,3 +77,55 @@ def test_results_csv_fields_round_trip(tmp_path):
     sim.write_csv([{f: 1 for f in run.FIELDS}], path, run.FIELDS)
     with path.open() as f:
         assert next(iter(csv.DictReader(f)))["per_step_overhead_ms"] == "1"
+
+
+@needs_sim
+def test_e4_compares_policies_per_seed():
+    rows = sim.e4(seeds=range(1, 4))
+    assert len(rows) == 3 * len(sim.E4_WORKERS)
+    for r in rows:
+        assert r["critical_path"] <= r["fifo"] * 1.05  # never much worse
+        assert r["gain_pct"] == pytest.approx(100 * (r["fifo"] - r["critical_path"]) / r["fifo"], abs=1e-3)
+
+
+def test_e7_runs_tasks_in_dependency_order():
+    from planner.fake import load_fixture_plan
+    from planner.schema import ExecutionPlan
+
+    from bench import e7
+
+    plan = ExecutionPlan.model_validate(load_fixture_plan("company_research"))
+    order = e7._order(plan)
+    pos = {t: i for i, t in enumerate(order)}
+    assert sorted(order) == sorted(t.id for t in plan.tasks)
+    assert all(pos[d] < pos[t.id] for t in plan.tasks for d in t.depends_on)
+
+
+def test_e8_static_prompt_forbids_expand_and_reads_requested_counts():
+    from bench import e8
+
+    prompt = e8.static_prompt()
+    assert "Never use the expand type" in prompt and "Use expand only" not in prompt
+    assert "expand." not in prompt.splitlines()[[l.startswith("1. ") for l in prompt.splitlines()].index(True)]
+    assert e8.requested_items("Research the top 5 AI chip companies") == 5
+    assert e8.requested_items("Find the three largest cloud providers") == 3
+    assert e8.requested_items("Identify the most widely used vector databases") is None
+    tasks = [{"id": "t1", "type": "research", "title": "Identify the three largest cloud providers", "depends_on": []},
+             {"id": "t2", "type": "summarize", "title": "Summarize AWS AI strategy", "depends_on": ["t1"]},
+             {"id": "t3", "type": "compare", "title": "Compare", "depends_on": ["t2"]}]
+    assert [t["id"] for t in e8.static_items(tasks)] == ["t2"]
+
+
+def test_live_charts_and_tables_from_rows(tmp_path):
+    analyze._style()
+    e7_rows = [{"case": "two_companies", "mode": m, "latency_s": str(v), "planner_s": "4", "planner_share": "0.3",
+                "llm_calls": "7", "tokens_in": "100", "tokens_out": "50", "cost_usd": "0.0001", "retries": "0",
+                "output_chars": "900", "status": "SUCCEEDED"} for m, v in (("distributed", 10), ("sequential", 14),
+                                                                            ("single", 6))]
+    e8_rows = [{"case": "top_chip_companies", "mode": m, "latency_s": "40", "items": "5", "requested_items": "5",
+                "item_names": "A; B", "expand_tokens": c, "splice_delay_ms": d, "tokens_in": "1", "tokens_out": "1",
+                "cost_usd": "0", "retries": "0"} for m, c, d in (("expand", "2", "3"), ("static", "0", ""))]
+    assert analyze.e7_requests(e7_rows, tmp_path).exists()
+    assert analyze.e8_expansion(e8_rows, tmp_path).exists()
+    text = analyze.summary_live([], e7_rows, e8_rows)
+    assert "| two_companies | single | 6 |" in text and "| top_chip_companies | expand | 40 | 5 (5) |" in text

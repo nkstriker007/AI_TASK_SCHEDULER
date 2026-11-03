@@ -1,0 +1,10 @@
+case,mode,status,latency_s,planner_s,planner_share,exec_s,tasks,llm_calls,tokens_in,tokens_out,cost_usd,retries,output_chars,request_id
+two_companies,distributed,SUCCEEDED,10.5,4.31,0.41,6.19,6,7,5492,4306,0.003407,0,1959,req_2b415850
+two_companies,sequential,SUCCEEDED,13.55,4.31,0.318,9.24,6,7,5490,4279,0.003391,0,1844,
+two_companies,single,SUCCEEDED,6.17,0.0,0.0,6.17,0,1,140,2823,0.001715,0,10466,
+four_companies,distributed,SUCCEEDED,49.8,2.71,0.054,47.09,6,7,7553,6877,0.005259,2,3978,req_bcf1b426
+four_companies,sequential,SUCCEEDED,44.4,2.71,0.061,41.69,6,10,7945,7189,0.005505,3,3749,
+four_companies,single,SUCCEEDED,6.72,0.0,0.0,6.72,0,1,141,3072,0.001864,0,11672,
+mostly_sequential,distributed,SUCCEEDED,8.22,2.56,0.311,5.66,3,4,2740,2861,0.002128,0,4447,req_941c5fa6
+mostly_sequential,sequential,SUCCEEDED,4.92,2.56,0.52,2.36,3,4,2308,1216,0.001076,0,651,
+mostly_sequential,single,SUCCEEDED,4.34,0.0,0.0,4.34,0,1,143,1882,0.001151,0,6126,

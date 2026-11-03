@@ -19,6 +19,8 @@ from .validate import validate_plan
 
 DEFAULT_MODEL = "openai/gpt-oss-120b"  # supports Groq strict structured outputs
 MODEL_ENV = "ATS_PLANNER_MODEL"
+# Warnings that make a valid plan worth one repair (D54).
+REPAIR_WARNINGS = frozenset({IssueCode.MULTIPLE_SINKS, IssueCode.EXPAND_FANOUT})
 
 
 class PlanRejected(Exception):
@@ -44,21 +46,34 @@ class Planner(ABC):
         are sent back through propose(feedback=...) once; if that also fails, the
         second attempt's issues are raised. `last_attempts` records 1 or 2 so the
         eval can report how often repair was needed.
+
+        A valid first plan with a REPAIR_WARNINGS warning is also sent back once (D54): rule 5
+        (one final task) and rule 2 (no per-item placeholders after an expand) are what makes the
+        answer usable. It is still a valid plan, so it is returned if the repair does not help.
         """
         feedback: list[ValidationIssue] | None = None
+        fallback: ExecutionPlan | None = None
         for attempt in (1, 2):
             self.last_attempts = attempt
             try:
                 raw = self.propose(request, feedback=feedback)
             except PlanRejected as exc:  # unparseable output counts as a failed attempt
                 if attempt == 2:
+                    if fallback is not None:
+                        return fallback
                     raise
                 feedback = exc.issues
                 continue
             result = validate_plan(raw)
             if result.ok:
+                repair = [w for w in result.warnings if w.code in REPAIR_WARNINGS]
+                if attempt == 1 and repair:
+                    fallback, feedback = result.value, repair
+                    continue
                 return result.value
             if attempt == 2:
+                if fallback is not None:
+                    return fallback
                 raise PlanRejected(result.issues, raw)
             feedback = result.errors
         raise AssertionError("unreachable")

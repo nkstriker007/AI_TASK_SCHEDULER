@@ -58,6 +58,33 @@ async def load_result(redis: Redis, request_id: str, task_id: str, artifacts_roo
     return value
 
 
+def _task_order(tid: str) -> tuple:
+    """t2 < t2.1 < t2.2 < t2.10 < t2.join < t3."""
+    head, _, tail = tid.partition(".")
+    return (int(head[1:]) if head[1:].isdigit() else 0, tail != "", tail == "join",
+            int(tail) if tail.isdigit() else 0, tid)
+
+
+def _spliced_tasks(owner: str, subplan: Any) -> dict[str, dict[str, Any]]:
+    """The tasks atsd spliced from `owner`'s subplan, by runtime id (D53): subplan task i is
+    <owner>.<i>, depending on the owner and its renamed local dependencies; <owner>.join depends
+    on every subplan sink."""
+    if not isinstance(subplan, dict) or not isinstance(subplan.get("tasks"), list):
+        return {}
+    local = {t.get("id"): f"{owner}.{i}" for i, t in enumerate(subplan["tasks"], 1) if isinstance(t, dict)}
+    out: dict[str, dict[str, Any]] = {}
+    has_child: set[str] = set()
+    for t in subplan["tasks"]:
+        if not isinstance(t, dict):
+            continue
+        deps = [local[d] for d in t.get("depends_on") or [] if d in local]
+        has_child.update(deps)
+        out[local[t.get("id")]] = {"type": t.get("type"), "title": t.get("title"), "depends_on": [owner, *deps]}
+    out[f"{owner}.join"] = {"type": "join", "title": f"Results of {owner}'s subtasks",
+                            "depends_on": [tid for tid in out if tid not in has_child]}
+    return out
+
+
 def _usage(raw: dict[str, str]) -> dict[str, Any] | None:
     if not raw:
         return None
@@ -86,13 +113,19 @@ async def request_status(redis: Redis, request_id: str, artifacts_root: Path | N
     for t in plan_file.plan.tasks:
         tasks.append({"id": t.id, "type": t.type.value, "title": t.title, "depends_on": t.depends_on,
                       **_task_state(runtime.get(f"task:{t.id}"))})
-    # Tasks spliced in by an expand task (t2.1, t2.2, ...) exist only in the runtime hash.
+    # Tasks spliced in by an expand task (t2.1, t2.2, ..., t2.join) exist only in the runtime hash;
+    # they are described from the expand task's committed subplan (D53).
     planned = {t.id for t in plan_file.plan.tasks}
-    for field in sorted(f for f in runtime if f.startswith("task:")):
-        tid = field.removeprefix("task:")
-        if tid not in planned:
-            tasks.append({"id": tid, "type": None, "title": None, "depends_on": None,
-                          **_task_state(runtime[field])})
+    spliced = sorted((f.removeprefix("task:") for f in runtime if f.startswith("task:")), key=_task_order)
+    subplans: dict[str, dict[str, dict[str, Any]]] = {}
+    for tid in spliced:
+        if tid in planned:
+            continue
+        owner = tid.split(".", 1)[0]
+        if owner not in subplans:
+            subplans[owner] = _spliced_tasks(owner, await load_result(redis, request_id, owner, artifacts_root))
+        info = subplans[owner].get(tid, {"type": None, "title": None, "depends_on": None})
+        tasks.append({"id": tid, **info, **_task_state(runtime[f"task:{tid}"])})
     completed = [t["id"] for t in tasks if t["state"] == "COMPLETED"]
 
     # Final output: the single sink's result; with several sinks, each of them by task id.

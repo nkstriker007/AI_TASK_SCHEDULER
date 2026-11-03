@@ -124,6 +124,7 @@ class IssueCode(str, Enum):
     CYCLE = "CYCLE"
     TRANSITIVE_EDGE = "TRANSITIVE_EDGE"  # warning, Python only
     MULTIPLE_SINKS = "MULTIPLE_SINKS"  # warning, Python only
+    EXPAND_FANOUT = "EXPAND_FANOUT"  # warning, Python only (D54)
 
 
 class ValidationIssue(BaseModel):

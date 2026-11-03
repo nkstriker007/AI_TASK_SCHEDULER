@@ -148,6 +148,27 @@ def test_get_running_and_finished_request(redis_url, r):
     assert finished["status"] == "SUCCEEDED" and finished["output"] == {"content": "final report"}
 
 
+def test_spliced_tasks_are_described_from_the_subplan(redis_url, r):
+    def sub(i, deps=()):
+        return {"id": f"s{i}", "type": "research", "title": f"Company {i}", "instruction": "x", "depends_on": list(deps)}
+
+    with client(redis_url) as c:
+        rid = c.post("/plans", json=load_fixture_plan("expand_canned")).json()["request_id"]
+        # t2 is the expand task; 11 subtasks, s11 depends on s10 (so s10 is not a sink)
+        r.set(result_key(rid, "t2"), json.dumps({"tasks": [sub(i) for i in range(1, 11)] + [sub(11, ["s10"])]}))
+        r.hset(keys.request_key(rid), mapping={"status": "RUNNING", **{
+            f"task:{tid}": json.dumps({"state": "WAITING", "attempt": 0})
+            for tid in ["t2.join", "t2.10", "t2.2", "t2.1", "t2.11"]}})
+        tasks = c.get(f"/requests/{rid}").json()["tasks"]
+
+    spliced = [t for t in tasks if "." in t["id"]]
+    assert [t["id"] for t in spliced] == ["t2.1", "t2.2", "t2.10", "t2.11", "t2.join"]  # numeric order
+    assert (spliced[0]["type"], spliced[0]["title"]) == ("research", "Company 1")
+    assert spliced[3]["depends_on"] == ["t2", "t2.10"]
+    join = spliced[-1]
+    assert join["type"] == "join" and "t2.10" not in join["depends_on"] and "t2.11" in join["depends_on"]
+
+
 def test_plain_text_result_is_returned_not_a_500(redis_url, r):
     with client(redis_url) as c:
         rid = c.post("/plans", json=load_fixture_plan("chain")).json()["request_id"]

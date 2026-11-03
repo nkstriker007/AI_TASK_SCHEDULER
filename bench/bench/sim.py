@@ -44,6 +44,31 @@ def sweep(workloads_dir: Path = WORKLOADS_DIR, ats_sim: Path = ATS_SIM) -> list[
     return rows
 
 
+E4_SEEDS = range(1, 101)
+E4_WORKERS = (2, 3, 4)
+E4_FIELDS = ("seed", "workers", "fifo", "critical_path", "gain_pct")
+
+
+def e4(ats_sim: Path = ATS_SIM, seeds=E4_SEEDS) -> list[dict]:
+    """E4: critical-path priority vs FIFO on layered-24 with scarce workers, one random DAG per seed.
+    In the simulator: E1 shows it matches the distributed runtime within a few percent."""
+    import tempfile
+
+    from .gen import layered
+
+    rows = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for seed in seeds:
+            plan = Path(tmp) / f"layered-{seed}.json"
+            plan.write_text(json.dumps(layered(seed=seed)))
+            for workers in E4_WORKERS:
+                f = simulate(plan, workers, "fifo", ats_sim)["makespan"]
+                c = simulate(plan, workers, "critical-path", ats_sim)["makespan"]
+                rows.append({"seed": seed, "workers": workers, "fifo": f, "critical_path": c,
+                             "gain_pct": round(100 * (f - c) / f, 3)})
+    return rows
+
+
 def write_csv(rows: list[dict], path: Path, fields=FIELDS) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -62,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     rows = sweep(ats_sim=a.ats_sim)
     write_csv(rows, a.out)
     print(f"wrote {a.out} ({len(rows)} simulations)")
+    e4_rows = e4(a.ats_sim)
+    write_csv(e4_rows, a.out.parent / "e4.csv", E4_FIELDS)
+    print(f"wrote {a.out.parent / 'e4.csv'} ({len(e4_rows)} seeds x workers, both policies)")
     return 0
 
 

@@ -61,6 +61,7 @@ Changing anything here takes a PR that updates `planner/planner/schema.py`, the 
 | `CYCLE` | Kahn's algorithm cannot emit every task; one issue lists the unemitted tasks in plan order |
 | `TRANSITIVE_EDGE` | warning, Python only |
 | `MULTIPLE_SINKS` | warning, Python only |
+| `EXPAND_FANOUT` | warning, Python only: an expand task with more than one direct dependent (D54) |
 
 The details that decide parity:
 
