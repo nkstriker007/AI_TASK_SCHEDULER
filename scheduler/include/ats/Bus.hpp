@@ -1,11 +1,20 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace ats {
+
+// One entry of a consumer group's pending list (XPENDING, extended form).
+struct PendingEntry {
+  std::string id;
+  std::string consumer;
+  std::int64_t idleMs = 0;      // time since it was last delivered
+  std::int64_t deliveries = 0;
+};
 
 // One stream entry. Every entry in this system has a single field, `data`, holding JSON
 // (contract #2), so only that field is surfaced.
@@ -49,6 +58,16 @@ class Bus {
 
   // EXISTS <key>
   virtual bool exists(const std::string& key) = 0;
+
+  // ---- used by the janitor (D49) ----
+
+  // XPENDING <stream> <group> IDLE <minIdleMs> <start> + <count>. `afterId` empty = from the
+  // beginning, otherwise entries with ids greater than it. Empty if the stream or group is missing.
+  virtual std::vector<PendingEntry> pending(const std::string& stream, const std::string& group,
+                                            std::int64_t minIdleMs, const std::string& afterId, int count) = 0;
+
+  // XRANGE <stream> <id> <id>: the entry's `data` field; nullopt if it no longer exists.
+  virtual std::optional<std::string> entryData(const std::string& stream, const std::string& id) = 0;
 };
 
 }  // namespace ats

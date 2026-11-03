@@ -378,6 +378,88 @@ void Service::tick() {
   startDueRetries();
   dispatchAll();
   sweepFinished();
+  if (config_.janitorIntervalMs > 0 && now_() >= nextJanitorMs_) {
+    nextJanitorMs_ = now_() + config_.janitorIntervalMs;
+    try {
+      runJanitor();
+    } catch (const std::exception& ex) {  // hygiene must never stop the scheduler
+      diag(std::string("janitor: ") + ex.what());
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------- janitor
+
+// True if the TaskMessage `data` belongs to an attempt atsd no longer waits for (D49): its request
+// is finished, its task is terminal, a newer attempt has been dispatched, or this attempt was
+// already declared lost or failed. Anything atsd cannot place is left alone, except entries that
+// cannot be read at all, which no worker could run either.
+bool Service::attemptResolved(const std::string& data) {
+  std::string attemptId;
+  try {
+    json m = json::parse(data);
+    if (m.is_object() && m.contains("attempt_id") && m["attempt_id"].is_string())
+      attemptId = m["attempt_id"].get<std::string>();
+  } catch (const json::exception&) {
+    return true;
+  }
+  std::string rid, tid;
+  int attempt = 0;
+  if (!splitAttemptId(attemptId, rid, tid, attempt)) return true;
+
+  auto it = active_.find(rid);
+  if (it == active_.end()) {
+    if (finished_.count(rid)) return true;
+    const auto status = bus_.hget(keys::requestKey(rid), "status");  // finished by an earlier atsd
+    return status && (*status == "SUCCEEDED" || *status == "FAILED" || *status == "REJECTED");
+  }
+  const RequestRun& req = *it->second;
+  auto node = req.dag.find(tid);
+  if (!node) return true;
+  const NodeRun& nr = req.nodes[*node];
+  if (isTerminal(req.sched->state().state(*node))) return true;
+  if (attempt < nr.attempt) return true;                // superseded by a newer attempt
+  if (attempt == nr.attempt) return !nr.inFlight;       // lost or failed, waiting for its retry
+  return false;                                         // newer than atsd knows: leave it
+}
+
+std::size_t Service::runJanitor() {
+  ++stats_.janitorRuns;
+  std::size_t acked = 0;
+  constexpr int kPage = 100;
+  constexpr std::size_t kMaxPerRun = 1000;  // bounded work per tick
+  for (const auto& [capability, cfg] : config_.capabilities) {
+    const std::string stream = keys::taskStream(capability);
+    std::string after;
+    std::size_t seen = 0;
+    while (seen < kMaxPerRun) {
+      auto page = bus_.pending(stream, keys::kWorkersGroup, config_.janitorMinIdleMs, after, kPage);
+      if (page.empty()) break;
+      for (const auto& p : page) {
+        after = p.id;
+        ++seen;
+        const auto data = bus_.entryData(stream, p.id);
+        if (data && !attemptResolved(*data)) continue;  // still the live attempt: its deadline owns it
+        bus_.ack(stream, keys::kWorkersGroup, p.id);
+        ++acked;
+        std::string rid, tid;
+        int attempt = 0;
+        if (data) {
+          try {
+            json m = json::parse(*data);
+            if (m.is_object() && m.contains("attempt_id") && m["attempt_id"].is_string())
+              splitAttemptId(m["attempt_id"].get<std::string>(), rid, tid, attempt);
+          } catch (const json::exception&) {
+          }
+        }
+        log("janitor_acked", rid, tid, attempt, p.consumer,
+            stream + " " + p.id + " idle " + std::to_string(p.idleMs) + " ms" + (data ? "" : " (entry deleted)"));
+      }
+      if (page.size() < static_cast<std::size_t>(kPage)) break;
+    }
+  }
+  stats_.janitorAcked += acked;
+  return acked;
 }
 
 std::optional<std::int64_t> Service::nextTimerMs() const {

@@ -25,6 +25,7 @@ namespace keys {
 inline constexpr const char* kRequestsStream = "requests:new";
 inline constexpr const char* kEventsStream = "task:events";
 inline constexpr const char* kSchedulerGroup = "scheduler";
+inline constexpr const char* kWorkersGroup = "workers";
 inline std::string taskStream(const std::string& capability) { return "tasks:" + capability; }
 inline std::string requestKey(const std::string& requestId) { return "request:" + requestId; }
 inline std::string resultKey(const std::string& requestId, const std::string& taskId) {
@@ -58,6 +59,11 @@ struct ServiceConfig {
       {"sim", CapabilityConfig{0, 300'000, {}, 0.0}},
   };
   std::uint64_t seed = 42;              // backoff jitter
+  // Janitor (D49): every janitorIntervalMs, acknowledge entries in tasks:<capability> (group
+  // "workers") that have been pending for at least janitorMinIdleMs and whose attempt is already
+  // resolved. Hygiene only: it never retries or changes a task. 0 disables it.
+  std::int64_t janitorIntervalMs = 30'000;
+  std::int64_t janitorMinIdleMs = 60'000;
 };
 
 // atsd's logic, with no I/O of its own: the Bus does Redis, the clock is injected, and the
@@ -79,6 +85,7 @@ class Service {
   struct Stats {
     std::size_t ingested = 0, rejected = 0, succeeded = 0, failed = 0;
     std::size_t resumed = 0, restoredTasks = 0;  // requests picked up again after a restart (D44)
+    std::size_t janitorRuns = 0, janitorAcked = 0;  // D49
     std::size_t dispatched = 0, retries = 0, lostAttempts = 0;
     std::size_t duplicateCompletions = 0, ignoredEvents = 0;
   };
@@ -103,6 +110,10 @@ class Service {
   // Clean shutdown (D43): stop taking requests and dispatching; keep handling events so the
   // attempts in flight can finish. Unfinished requests stay pending for the next atsd.
   void beginDrain();
+
+  // One janitor pass over every capability stream (D49); tick() runs it every janitorIntervalMs.
+  // Returns how many dead pending entries it acknowledged.
+  std::size_t runJanitor();
   bool draining() const { return draining_; }
   std::size_t inFlightTotal() const;
 
@@ -137,6 +148,7 @@ class Service {
            const std::string& worker = "", const std::string& detail = "");
   void diag(const std::string& message);
   std::int64_t backoffFor(const std::string& capability, int attempt);
+  bool attemptResolved(const std::string& data);
 
   Bus& bus_;
   ServiceConfig config_;
@@ -153,6 +165,7 @@ class Service {
   std::uint64_t arrivalCounter_ = 0;
   std::shared_ptr<std::uint64_t> readyTickets_ = std::make_shared<std::uint64_t>(0);  // shared by every Scheduler
   bool draining_ = false;
+  std::int64_t nextJanitorMs_ = 0;
   Stats stats_;
 };
 

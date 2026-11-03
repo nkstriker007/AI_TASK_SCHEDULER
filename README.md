@@ -142,7 +142,8 @@ cd api && uv sync && uv run uvicorn api.app:app --port 8000
 ```
 
 atsd configuration (environment): `REDIS_URL`, `ATSD_CAPABILITY` (send every task to `sim` or `llm`;
-default `llm`), `ATSD_POLICY` (`fair-share` | `critical-path` | `fifo`, D41), `ATSD_DRAIN_MS` (30000, D43), `ATSD_MAX_ATTEMPTS` (3),
+default `llm`), `ATSD_POLICY` (`fair-share` | `critical-path` | `fifo`, D41), `ATSD_DRAIN_MS` (30000, D43),
+`ATSD_JANITOR_INTERVAL_MS` (30000; 0 = off) and `ATSD_JANITOR_MIN_IDLE_MS` (60000) (D49), `ATSD_MAX_ATTEMPTS` (3),
 `ATSD_LLM_MAX_INFLIGHT` (8), `ATSD_SIM_MAX_INFLIGHT` (0 = unlimited), `ATSD_LLM_TIMEOUT_MS` (120000),
 `ATSD_SIM_TIMEOUT_MS` (300000), `ATSD_RUNS_DIR` (`runs`). Workers and the API use `REDIS_URL` too
 (default `redis://localhost:6379/0`); the Groq worker uses `ATS_EXECUTOR_MODEL`. Tests that need Redis
@@ -171,7 +172,7 @@ make redis-spike                # builds and runs tools/redis_ping.cpp (PING, XA
 ```
 docs/contract.md                 contract #1: plan file format, issue codes, parity rules
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
-docs/DECISIONS.md                decisions made during the build (D15, D17–D48)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D49)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -289,7 +290,7 @@ Written on Day 3 to the agreed contracts and Person B's Day 1–2 core, for Pers
 - [x] 4 end-to-end tests with the real binary, real Redis and real workers (`worker/tests/test_atsd_e2e.py`), including a worker that dies holding a task: recovered by the deadline, one committed result per task
 - [x] Docker image (`scheduler/Dockerfile`) and `atsd` service in `docker-compose.yml`; CI installs hiredis and builds atsd
 - [x] Day 4: see "Day 4 status: Person B"
-- [ ] Day 5: janitor for dead pending entries (8.7)
+- [x] Day 5: janitor for dead pending entries (8.7, D49)
 
 ## Day 3 gate
 
@@ -333,6 +334,13 @@ ATSD_CAPABILITY=sim ATSD_SIM_MAX_INFLIGHT=2 ATSD_POLICY=fifo ./scheduler/build/a
 - [x] Error classification: injected and provider errors map to retryable (with `retry_after_ms`) or permanent; atsd pauses the capability on `retry_after_ms` (D39) and backs off 2–32 s (D45)
 - [x] Chaos test (`worker/tests/test_chaos.py`, D48) with the real atsd: 4 requests through 20 % errors, 429s, hangs, stragglers, a crashed and a killed worker; all succeed, exactly one committed result per task, retries and lost attempts in atsd's log (passes 5 runs out of 5)
 - [x] Chaos script (`scripts/chaos.py`, `make chaos`): Docker stack, `docker kill` of worker containers that are running a task, restart, report. Run: 6 requests, 3 workers killed, 20 retries and 4 lost attempts logged, all SUCCEEDED, 0 duplicate commits
+
+## Day 5 status: Person B
+
+- [x] Attempts, deadlines, retries with backoff, late-event handling and idempotent completion: in atsd since Day 3 (D10, D33), kept across restarts on Day 4 (D44)
+- [x] Janitor for dead pending entries (D49, design doc 8.7): acknowledges `tasks:*` entries left pending by dead workers once their attempt is resolved; never retries; `janitor_acked` in the event log, a count in atsd's exit line
+- [x] `Bus::pending` (`XPENDING ... IDLE`) and `Bus::entryData` (`XRANGE`) in `RedisBus`
+- [x] 10 fake-clock unit tests (live attempt left alone until its deadline, failed / superseded / completed attempts, finished requests, requests from before a restart, unreadable and deleted entries, idle threshold, never changes state, interval, late completion still accepted), 2 integration tests against a real Redis, 1 end-to-end test (a worker dies holding t1: the deadline recovers it, the janitor acknowledges the dead entry, nothing left pending, one committed result per task)
 
 ## Day 5 gate
 

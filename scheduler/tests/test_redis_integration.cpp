@@ -276,3 +276,59 @@ TEST_F(RedisFixture, DrainingLeavesNewRequestsForTheNextService) {
   EXPECT_EQ(next.activeRequests(), 1u);
   EXPECT_EQ(w.take().size(), 1u);
 }
+
+// ------------------------------------------------------------------------------------------
+// Day 5: the janitor (D49) against real XPENDING / XRANGE
+
+TEST_F(RedisFixture, PendingAndEntryDataRoundTrip) {
+  auto b = bus();
+  EXPECT_TRUE(b->pending("tasks:none", "workers", 0, "", 10).empty());  // no stream or group: not an error
+  b->createGroup("tasks:sim", "workers");
+  const std::string id1 = b->add("tasks:sim", R"({"attempt_id":"r:t1:1"})");
+  const std::string id2 = b->add("tasks:sim", R"({"attempt_id":"r:t2:1"})");
+  ASSERT_EQ(b->readGroup("workers", "w-dead", {"tasks:sim"}, 10, 0).size(), 2u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+  auto all = b->pending("tasks:sim", "workers", 50, "", 10);
+  ASSERT_EQ(all.size(), 2u);
+  EXPECT_EQ(all[0].id, id1);
+  EXPECT_EQ(all[0].consumer, "w-dead");
+  EXPECT_GE(all[0].idleMs, 50);
+  EXPECT_EQ(all[0].deliveries, 1);
+  auto rest = b->pending("tasks:sim", "workers", 50, id1, 10);  // exclusive start
+  ASSERT_EQ(rest.size(), 1u);
+  EXPECT_EQ(rest[0].id, id2);
+  EXPECT_TRUE(b->pending("tasks:sim", "workers", 60'000, "", 10).empty());  // not idle long enough
+
+  EXPECT_EQ(b->entryData("tasks:sim", id2), R"({"attempt_id":"r:t2:1"})");
+  cmd({"XDEL", "tasks:sim", id2});
+  EXPECT_FALSE(b->entryData("tasks:sim", id2));
+  EXPECT_EQ(b->pending("tasks:sim", "workers", 0, "", 10).size(), 2u);  // still pending after XDEL
+}
+
+TEST_F(RedisFixture, JanitorAcksADeadWorkersEntryOnlyAfterItsAttemptIsLost) {
+  auto b = bus();
+  ats::ServiceConfig c = simConfig();
+  c.capabilities["sim"].timeoutMs = 100;
+  c.janitorIntervalMs = 0;  // run by hand
+  c.janitorMinIdleMs = 50;
+  ats::Service svc(*b, c, wallMs);
+  svc.setup();
+  cmd({"XADD", "requests:new", "*", "data", planFile({task("t1")}).dump()});
+  svc.pollOnce(20);
+  b->createGroup("tasks:sim", "workers");
+  auto taken = b->readGroup("workers", "w-dead", {"tasks:sim"}, 10, 0);  // the worker that dies
+  ASSERT_EQ(taken.size(), 1u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  EXPECT_EQ(svc.runJanitor(), 0u);  // attempt 1 is still live
+  EXPECT_EQ(b->pending("tasks:sim", "workers", 0, "", 10).size(), 1u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  svc.pollOnce(10);                 // deadline passed: attempt 1 lost, attempt 2 dispatched (no backoff for sim)
+  EXPECT_EQ(svc.stats().lostAttempts, 1u);
+  EXPECT_EQ(svc.runJanitor(), 1u);
+  EXPECT_TRUE(b->pending("tasks:sim", "workers", 0, "", 10).empty());  // attempt 2 was never read
+  auto next = b->readGroup("workers", "w-live", {"tasks:sim"}, 10, 0);
+  ASSERT_EQ(next.size(), 1u);
+  EXPECT_NE(next[0].data.find("req_test:t1:2"), std::string::npos);
+}

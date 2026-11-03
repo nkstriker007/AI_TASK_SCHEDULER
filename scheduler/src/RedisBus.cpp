@@ -162,4 +162,37 @@ bool RedisBus::exists(const std::string& key) {
   return reply->type == REDIS_REPLY_INTEGER && reply->integer > 0;
 }
 
+std::vector<PendingEntry> RedisBus::pending(const std::string& stream, const std::string& group,
+                                            std::int64_t minIdleMs, const std::string& afterId, int count) {
+  // IDLE and exclusive "(" ranges need Redis 6.2+ (docker-compose runs Redis 7).
+  ReplyPtr reply(command({"XPENDING", stream, group, "IDLE", std::to_string(minIdleMs),
+                          afterId.empty() ? "-" : "(" + afterId, "+", std::to_string(count)},
+                         "NOGROUP"));
+  std::vector<PendingEntry> out;
+  if (reply->type != REDIS_REPLY_ARRAY) return out;  // NOGROUP: no stream or group yet
+  for (std::size_t i = 0; i < reply->elements; ++i) {
+    const redisReply* e = reply->element[i];
+    if (e->type != REDIS_REPLY_ARRAY || e->elements != 4) continue;
+    PendingEntry p;
+    p.id = str(e->element[0]);
+    p.consumer = str(e->element[1]);
+    if (e->element[2]->type == REDIS_REPLY_INTEGER) p.idleMs = e->element[2]->integer;
+    if (e->element[3]->type == REDIS_REPLY_INTEGER) p.deliveries = e->element[3]->integer;
+    out.push_back(std::move(p));
+  }
+  return out;
+}
+
+std::optional<std::string> RedisBus::entryData(const std::string& stream, const std::string& id) {
+  ReplyPtr reply(command({"XRANGE", stream, id, id}));
+  if (reply->type != REDIS_REPLY_ARRAY || reply->elements == 0) return std::nullopt;
+  const redisReply* entry = reply->element[0];
+  if (entry->type != REDIS_REPLY_ARRAY || entry->elements != 2 || entry->element[1]->type != REDIS_REPLY_ARRAY)
+    return std::nullopt;
+  const redisReply* fields = entry->element[1];
+  for (std::size_t f = 0; f + 1 < fields->elements; f += 2)
+    if (str(fields->element[f]) == "data") return str(fields->element[f + 1]);
+  return std::string{};
+}
+
 }  // namespace ats

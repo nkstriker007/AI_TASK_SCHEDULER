@@ -108,6 +108,7 @@ atsd (`scheduler/src/Service.cpp`, run by `scheduler/tools/atsd.cpp`) translates
 | `task_failed` `permanent`, or retryable with no attempts left (default 3) | `fail(n)` | → FAILED; every unfinished descendant → CANCELLED, and the request fails once nothing is left running |
 | `task_failed` for an older attempt | none | that attempt was already handled when its deadline passed |
 | the current attempt's deadline passes | as a retryable `task_failed` | the only lost-attempt detector (D10); no XAUTOCLAIM |
+| an entry in `tasks:<capability>` stays pending in group `workers` (its worker died) | nothing | once its attempt is resolved and it has been idle 60 s, atsd's janitor XACKs it; hygiene only, never a retry (D49) |
 
 `atsd` writes `request:<id>` after every change (format above) and one JSON line per transition to `runs/<run_id>/events.jsonl` (8.12). Unit tests with a fake bus and a fake clock cover every row (`scheduler/tests/test_service.cpp`); `worker/tests/test_atsd_e2e.py` runs the real binary with real workers.
 

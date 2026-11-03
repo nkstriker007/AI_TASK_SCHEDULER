@@ -32,7 +32,7 @@ class FakeBus final : public ats::Bus {
   std::vector<ats::BusEntry> readPending(const std::string&, const std::string&, const std::string&,
                                          const std::string& afterId, int) override {
     std::vector<ats::BusEntry> out;
-    for (const auto& e : pending)
+    for (const auto& e : pendingRequests)
       if (afterId == "0" || e.id > afterId) out.push_back(e);  // ids in these tests compare as strings
     return out;
   }
@@ -44,7 +44,29 @@ class FakeBus final : public ats::Bus {
     return f->second;
   }
   bool exists(const std::string& key) override { return strings.count(key) || hashes.count(key); }
-  void ack(const std::string& stream, const std::string&, const std::string& id) override { acked.emplace_back(stream, id); }
+  // Janitor: `workerPending` plays the workers group's pending list on tasks:* streams.
+  std::vector<ats::PendingEntry> pending(const std::string& stream, const std::string& group, std::int64_t minIdleMs,
+                                         const std::string& afterId, int count) override {
+    ++pendingCalls;
+    std::vector<ats::PendingEntry> out;
+    if (group != "workers") return out;
+    for (const auto& [key, p] : workerPending) {
+      if (key.first != stream || p.idleMs < minIdleMs) continue;
+      if (!afterId.empty() && !(afterId < p.id)) continue;
+      out.push_back(p);
+      if (static_cast<int>(out.size()) == count) break;
+    }
+    return out;
+  }
+  std::optional<std::string> entryData(const std::string& stream, const std::string& id) override {
+    for (std::size_t i = 0; i < added.size(); ++i)
+      if (added[i].first == stream && std::to_string(i + 1) + "-0" == id) return added[i].second;
+    return std::nullopt;
+  }
+  void ack(const std::string& stream, const std::string&, const std::string& id) override {
+    acked.emplace_back(stream, id);
+    workerPending.erase({stream, id});
+  }
   std::string add(const std::string& stream, const std::string& data) override {
     added.emplace_back(stream, data);
     return std::to_string(added.size()) + "-0";
@@ -65,8 +87,10 @@ class FakeBus final : public ats::Bus {
   }
 
   std::vector<std::pair<std::string, std::string>> groups, acked, added;
-  std::vector<ats::BusEntry> inbox, pending;
+  std::vector<ats::BusEntry> inbox, pendingRequests;
   std::vector<std::string> lastStreams;
+  std::map<std::pair<std::string, std::string>, ats::PendingEntry> workerPending;  // (stream, id) -> entry
+  int pendingCalls = 0;
   std::map<std::string, std::string> strings;  // e.g. committed results
   std::map<std::string, std::map<std::string, std::string>> hashes;
 };
@@ -537,7 +561,7 @@ TEST(ServiceResume, RestartSkipsCommittedTasksAndContinuesAttemptNumbers) {
                                       {"task:t1", R"({"state":"COMPLETED","attempt":1})"},
                                       {"task:t2", R"({"state":"RUNNING","attempt":2})"},
                                       {"task:t3", R"({"state":"WAITING","attempt":0})"}};
-  f.bus.pending.push_back({"requests:new", "5-0", chain().dump()});
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", chain().dump()});
 
   EXPECT_EQ(f.svc.recoverPending(), 1u);
   EXPECT_EQ(f.svc.stats().resumed, 1u);
@@ -559,7 +583,7 @@ TEST(ServiceResume, RestartSkipsCommittedTasksAndContinuesAttemptNumbers) {
 TEST(ServiceResume, ARestartGivesAFreshRetryBudget) {
   Fixture f;
   f.bus.hashes["request:req_test"] = {{"status", "RUNNING"}, {"task:t1", R"({"state":"RETRYING","attempt":2})"}};
-  f.bus.pending.push_back({"requests:new", "5-0", chain().dump()});
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", chain().dump()});
   f.svc.recoverPending();
   f.failed("req_test", "t1", 3, "retryable");
   f.advance(1'000);
@@ -575,7 +599,7 @@ TEST(ServiceResume, AResultArrivingBeforeTheRedispatchCompletesWithoutAMessage) 
   Fixture f(simConfig(/*simCap=*/1));
   f.bus.hashes["request:req_other"] = {{"status", "RUNNING"}, {"task:t1", R"({"state":"RUNNING","attempt":1})"}};
   f.submit(named(chain(), "req_busy"));  // holds the only slot
-  f.bus.pending.push_back({"requests:new", "5-0", named(chain(), "req_other").dump()});
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", named(chain(), "req_other").dump()});
   f.svc.recoverPending();
   EXPECT_EQ(f.bus.taskState("req_other", "t1"), "READY");
   f.completed("req_other", "t1", 1);  // the pre-restart attempt finishes
@@ -588,7 +612,7 @@ TEST(ServiceResume, AResultArrivingBeforeTheRedispatchCompletesWithoutAMessage) 
 TEST(ServiceResume, FinishedButUnacknowledgedRequestsAreOnlyAcknowledged) {
   Fixture f;
   f.bus.hashes["request:req_test"] = {{"status", "SUCCEEDED"}};
-  f.bus.pending.push_back({"requests:new", "5-0", chain().dump()});
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", chain().dump()});
   EXPECT_EQ(f.svc.recoverPending(), 0u);
   EXPECT_TRUE(f.bus.messages().empty());
   EXPECT_EQ(f.bus.acked, (std::vector<std::pair<std::string, std::string>>{{"requests:new", "5-0"}}));
@@ -597,7 +621,7 @@ TEST(ServiceResume, FinishedButUnacknowledgedRequestsAreOnlyAcknowledged) {
 
 TEST(ServiceResume, InvalidPendingEntryIsRejectedAndAcknowledged) {
   Fixture f;
-  f.bus.pending.push_back({"requests:new", "5-0", planFile({task("t1", {"t1"})}).dump()});
+  f.bus.pendingRequests.push_back({"requests:new", "5-0", planFile({task("t1", {"t1"})}).dump()});
   EXPECT_EQ(f.svc.recoverPending(), 0u);
   EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "REJECTED");
   EXPECT_EQ(f.bus.acked.size(), 1u);
@@ -610,4 +634,148 @@ TEST(Service, LlmBackoffDoublesSoSixAttemptsOutlastAMinute) {
   std::int64_t total = 0;
   for (auto b : backoff) total += b;  // waits before attempts 2..6
   EXPECT_GT(total, 60'000);
+}
+
+// ------------------------------------------------------------------------------------------
+// Day 5: the janitor for dead pending entries (D49, design doc 8.7)
+
+namespace {
+
+ats::ServiceConfig janitorConfig(std::int64_t interval = 30'000) {
+  ats::ServiceConfig c = simConfig();
+  c.janitorIntervalMs = interval;
+  c.janitorMinIdleMs = 60'000;
+  return c;
+}
+
+// The n-th message dispatched has stream id "<n>-0" in FakeBus.
+void leavePending(FakeBus& bus, int n, std::int64_t idleMs = 70'000, const std::string& consumer = "w-dead") {
+  const std::string id = std::to_string(n) + "-0";
+  bus.workerPending[{"tasks:sim", id}] = ats::PendingEntry{id, consumer, idleMs, 1};
+}
+
+bool ackedTask(const FakeBus& bus, int n) {
+  const std::pair<std::string, std::string> key{"tasks:sim", std::to_string(n) + "-0"};
+  return std::find(bus.acked.begin(), bus.acked.end(), key) != bus.acked.end();
+}
+
+}  // namespace
+
+TEST(ServiceJanitor, LeavesTheLiveAttemptAndAcksItOnceItIsLost) {
+  Fixture f(janitorConfig(0));  // run by hand
+  f.submit(chain());
+  leavePending(f.bus, 1);       // t1 attempt 1: its worker died holding it
+  EXPECT_EQ(f.svc.runJanitor(), 0u);  // still the live attempt: only its deadline may act (D10)
+  EXPECT_FALSE(ackedTask(f.bus, 1));
+
+  f.advance(10'000);            // deadline: attempt 1 lost, retry in 1 s
+  EXPECT_EQ(f.svc.runJanitor(), 1u);
+  EXPECT_TRUE(ackedTask(f.bus, 1));
+
+  f.advance(1'000);             // attempt 2 dispatched as message 2
+  ASSERT_EQ(f.dispatched().back(), "req_test:t1:2");
+  leavePending(f.bus, 2);
+  EXPECT_EQ(f.svc.runJanitor(), 0u);  // the new live attempt is left alone
+  EXPECT_EQ(f.svc.stats().janitorAcked, 1u);
+}
+
+TEST(ServiceJanitor, AcksEntriesOfFailedSupersededAndCompletedAttempts) {
+  Fixture f(janitorConfig(0));
+  f.submit(planFile({task("t1"), task("t2"), task("t3", {"t1"})}));  // messages 1 (t1), 2 (t2)
+  f.failed("req_test", "t2", 1, "retryable");                      // waiting out its backoff
+  f.completed("req_test", "t1", 1);                                // message 3 = t3
+  f.advance(1'000);                                                // message 4 = t2 attempt 2
+  ASSERT_EQ(f.dispatched().back(), "req_test:t2:2");
+  for (int n : {1, 2, 3, 4}) leavePending(f.bus, n);
+  EXPECT_EQ(f.svc.runJanitor(), 2u);
+  EXPECT_TRUE(ackedTask(f.bus, 1));   // t1 COMPLETED (worker died after reporting, before XACK)
+  EXPECT_TRUE(ackedTask(f.bus, 2));   // t2 attempt 1, superseded by attempt 2
+  EXPECT_FALSE(ackedTask(f.bus, 3));  // t3 attempt 1 is live
+  EXPECT_FALSE(ackedTask(f.bus, 4));  // t2 attempt 2 is live
+}
+
+TEST(ServiceJanitor, AcksEverythingOfAFinishedRequest) {
+  Fixture f(janitorConfig(0));
+  f.submit(planFile({task("t1"), task("t2")}));
+  f.failed("req_test", "t1", 1, "permanent");
+  f.completed("req_test", "t2", 1);
+  ASSERT_EQ(f.bus.hashes["request:req_test"]["status"], "FAILED");
+  leavePending(f.bus, 1);
+  leavePending(f.bus, 2);
+  EXPECT_EQ(f.svc.runJanitor(), 2u);
+}
+
+TEST(ServiceJanitor, RequestsFromBeforeARestartAreJudgedByTheirStatus) {
+  Fixture f(janitorConfig(0));
+  // Messages this atsd never sent: an earlier atsd's, for requests it does not track.
+  f.bus.added.emplace_back("tasks:sim", json{{"attempt_id", "req_done:t1:1"}}.dump());     // 1-0
+  f.bus.added.emplace_back("tasks:sim", json{{"attempt_id", "req_unknown:t1:1"}}.dump());  // 2-0
+  f.bus.hashes["request:req_done"]["status"] = "SUCCEEDED";
+  leavePending(f.bus, 1);
+  leavePending(f.bus, 2);
+  EXPECT_EQ(f.svc.runJanitor(), 1u);
+  EXPECT_TRUE(ackedTask(f.bus, 1));
+  EXPECT_FALSE(ackedTask(f.bus, 2));  // not known to be finished: left alone
+}
+
+TEST(ServiceJanitor, AcksEntriesThatCannotBeRead) {
+  Fixture f(janitorConfig(0));
+  f.bus.added.emplace_back("tasks:sim", "not json");  // 1-0
+  leavePending(f.bus, 1);
+  leavePending(f.bus, 9);  // 9-0 was deleted from the stream (XDEL/XTRIM)
+  EXPECT_EQ(f.svc.runJanitor(), 2u);
+  EXPECT_THAT(f.log.str(), ::testing::HasSubstr("(entry deleted)"));
+}
+
+TEST(ServiceJanitor, OnlyLongIdleEntriesAreConsidered) {
+  Fixture f(janitorConfig(0));
+  f.submit(chain());
+  f.failed("req_test", "t1", 1, "retryable");  // attempt 1 resolved...
+  leavePending(f.bus, 1, /*idleMs=*/5'000);    // ...but its worker may still be about to ack it
+  EXPECT_EQ(f.svc.runJanitor(), 0u);
+}
+
+TEST(ServiceJanitor, NeverDispatchesRetriesOrChangesState) {
+  Fixture f(janitorConfig(0));
+  f.submit(chain());
+  f.advance(10'000);  // t1 attempt 1 lost; retry due in 1 s
+  leavePending(f.bus, 1);
+  const auto before = f.dispatched();
+  const auto states = f.bus.hashes["request:req_test"];
+  f.svc.runJanitor();
+  EXPECT_EQ(f.dispatched(), before);
+  EXPECT_EQ(f.bus.hashes["request:req_test"], states);
+  EXPECT_EQ(f.svc.stats().retries, 1u);
+}
+
+TEST(ServiceJanitor, RunsFromTickOncePerInterval) {
+  Fixture f(janitorConfig(30'000));
+  f.svc.tick();
+  const int perRun = f.bus.pendingCalls;  // one XPENDING per capability stream
+  EXPECT_GE(perRun, 1);
+  EXPECT_EQ(f.svc.stats().janitorRuns, 1u);
+  f.advance(29'999);
+  EXPECT_EQ(f.svc.stats().janitorRuns, 1u);
+  f.advance(1);
+  EXPECT_EQ(f.svc.stats().janitorRuns, 2u);
+  EXPECT_EQ(f.bus.pendingCalls, 2 * perRun);
+}
+
+TEST(ServiceJanitor, IntervalZeroDisablesIt) {
+  Fixture f(janitorConfig(0));
+  f.submit(chain());
+  f.advance(120'000);
+  EXPECT_EQ(f.svc.stats().janitorRuns, 0u);
+  EXPECT_EQ(f.bus.pendingCalls, 0);
+}
+
+TEST(ServiceJanitor, ALateCompletionIsStillAcceptedAfterTheJanitorAckedItsEntry) {
+  Fixture f(janitorConfig(0));
+  f.submit(chain());
+  f.advance(10'000);                  // attempt 1 lost
+  leavePending(f.bus, 1);
+  ASSERT_EQ(f.svc.runJanitor(), 1u);
+  f.completed("req_test", "t1", 1);   // the "dead" worker was only slow (8.5)
+  EXPECT_EQ(f.bus.taskState("req_test", "t1"), "COMPLETED");
+  EXPECT_EQ(f.dispatched().back(), "req_test:t2:1");
 }

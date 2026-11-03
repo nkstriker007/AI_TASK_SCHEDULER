@@ -314,3 +314,46 @@ def test_fair_share_splits_a_capped_capacity_between_requests(redis_url, tmp_pat
         assert b[0][0] >= a[3][0]
 
     run(body())
+
+
+# --------------------------------------------------------------------------------- Day 5 (Person B)
+
+def test_janitor_acks_the_dead_workers_entry_after_recovery(redis_url, tmp_path):
+    """D49: a consumer takes t1 and dies without acking. atsd's deadline recovers the task
+    (D10); the janitor then acknowledges the dead entry, so nothing is left pending."""
+
+    async def body():
+        env = {"ATSD_JANITOR_INTERVAL_MS": "200", "ATSD_JANITOR_MIN_IDLE_MS": "300"}
+        async with Stack(redis_url, tmp_path, workers=2, sim_timeout_ms=1_000, atsd_env=env) as s:
+            pf = plan_file("chain", "req_d5a")
+            await s.submit(pf)
+            try:
+                await s.r.xgroup_create("tasks:sim", keys.WORKERS_GROUP, id="0", mkstream=True)
+            except Exception:
+                pass
+            grabbed = []
+            for _ in range(100):
+                resp = await s.r.xreadgroup(keys.WORKERS_GROUP, "dead-worker", {"tasks:sim": ">"}, count=1, block=50)
+                if resp:
+                    grabbed = resp[0][1]
+                    break
+            assert grabbed and json.loads(grabbed[0][1][STREAM_FIELD])["attempt_id"] == "req_d5a:t1:1"
+
+            s.start_workers()
+            assert await s.wait_status("req_d5a", timeout=20) == "SUCCEEDED"
+            # The janitor runs every 200 ms on entries idle 300 ms or more.
+            for _ in range(100):
+                if (await s.r.xpending("tasks:sim", keys.WORKERS_GROUP))["pending"] == 0:
+                    break
+                await asyncio.sleep(0.05)
+            assert (await s.r.xpending("tasks:sim", keys.WORKERS_GROUP))["pending"] == 0
+            completions = [e for e in await s.events("req_d5a") if e.event == "task_completed"]
+            assert sum(e.committed for e in completions) == 3  # janitor never caused a re-run
+        assert "1 lost attempts" in s.atsd_log
+        assert "1 dead pending entries acknowledged" in s.atsd_log
+        log = [json.loads(line) for line in (next((tmp_path / "runs").iterdir()) / "events.jsonl").read_text().splitlines()]
+        acked = [e for e in log if e["event"] == "janitor_acked"]
+        assert [(e["request"], e["task"], e["attempt"], e["worker"]) for e in acked] == \
+            [("req_d5a", "t1", 1, "dead-worker")]
+
+    run(body())

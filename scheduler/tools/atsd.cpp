@@ -17,6 +17,8 @@
 //   ATSD_RUNS_DIR           event log: <dir>/<run_id>/events.jsonl; empty disables   default runs
 //   ATSD_CONSUMER           consumer name in the group      default atsd  (keep it stable: D44)
 //   ATSD_DRAIN_MS           on SIGTERM, how long to wait for attempts in flight   default 30000
+//   ATSD_JANITOR_INTERVAL_MS  how often to acknowledge dead pending task entries (D49; 0 = off)   default 30000
+//   ATSD_JANITOR_MIN_IDLE_MS  only entries pending at least this long             default 60000
 //
 // Shutdown (D43): the first SIGTERM/SIGINT stops intake and dispatch and waits up to
 // ATSD_DRAIN_MS for the attempts in flight to report; a second signal stops at once. Requests
@@ -94,6 +96,8 @@ int main(int argc, char** argv) {
     if (!cfg.capabilities.count(cfg.defaultCapability))
       throw std::invalid_argument("ATSD_CAPABILITY must be llm or sim (got '" + cfg.defaultCapability + "')");
     const std::int64_t drainMs = envInt("ATSD_DRAIN_MS", 30'000);
+    cfg.janitorIntervalMs = envInt("ATSD_JANITOR_INTERVAL_MS", 30'000);
+    cfg.janitorMinIdleMs = envInt("ATSD_JANITOR_MIN_IDLE_MS", 60'000);
 
     const std::string url = env("REDIS_URL", "redis://127.0.0.1:6379/0");
     ats::RedisBus bus(ats::parseRedisUrl(url));
@@ -138,7 +142,8 @@ int main(int argc, char** argv) {
     std::cerr << "atsd: stopped | requests " << s.ingested << " (" << s.succeeded << " succeeded, " << s.failed
               << " failed, " << s.rejected << " rejected, " << service.activeRequests() << " unfinished) | "
               << s.dispatched << " dispatches, " << s.retries << " retries, " << s.lostAttempts << " lost attempts, "
-              << s.duplicateCompletions << " duplicate completions\n";
+              << s.duplicateCompletions << " duplicate completions, " << s.janitorAcked
+              << " dead pending entries acknowledged\n";
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "atsd: " << e.what() << "\n";
