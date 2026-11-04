@@ -15,12 +15,18 @@ from planner.validate import validate_subplan
 from worker.executors import ExecutionContext, LLMExecutor, PermanentError, RetryableError, SimExecutor
 from planner.schema import TaskType
 from worker.executors.llm import (
+    DEFAULT_EXECUTOR_MODEL,
     LLM_OUTPUT_SCHEMA,
     LLM_SUBPLAN_SCHEMA,
+    SMALL_EXECUTOR_MODEL,
     build_user_message,
     classify_provider_error,
+    input_budget,
+    input_text,
     load_executor_prompt,
     load_subplan_prompt,
+    model_for,
+    parse_output,
 )
 
 
@@ -130,7 +136,8 @@ def test_each_type_has_its_own_prompt():
     # expand's key_points are item names: the shared "one short sentence each" must not reach it
     assert "one short sentence each" not in prompts[TaskType.expand]
     assert all("one short sentence each" in prompts[t] for t in TaskType if t != TaskType.expand)
-    assert prompts[TaskType.expand].rstrip().endswith("never a sentence or a description.")
+    assert "never a sentence or a description." in prompts[TaskType.expand]
+    assert prompts[TaskType.expand].rstrip().endswith("final_answer: null.")
     subplan = load_subplan_prompt()
     assert "step 2 of 2" in subplan and "Never expand" in subplan and "key_points" not in subplan
     assert "name and nothing else" in subplan  # titles are item names, not sentences (Day 7 E8 run)
@@ -285,3 +292,57 @@ def test_after_repair_a_valid_subplan_is_accepted_even_if_it_misses_an_item():
     client = FakeGroq([DISCOVERY, partial, partial])
     r = run(LLMExecutor(TaskType.expand, client=client), msg(task_id="t2", type="expand"))
     assert r.result_kind == "subplan" and len(client.calls) == 3
+
+
+# --- D58: models per type, compact inputs, final_answer ---------------------------------------
+
+
+def test_model_per_task_type():
+    assert model_for(TaskType.research, {}) == DEFAULT_EXECUTOR_MODEL
+    assert model_for(TaskType.summarize, {}) == SMALL_EXECUTOR_MODEL
+    assert model_for(TaskType.report, {}) == SMALL_EXECUTOR_MODEL
+    # one model chosen for everything: the per-type defaults step aside
+    assert model_for(TaskType.report, {"ATS_EXECUTOR_MODEL": "m"}) == "m"
+    # explicit map, others on the base model; "" turns the map off
+    env = {"ATS_EXECUTOR_MODELS": "compare=small, report=big", "ATS_EXECUTOR_MODEL": "base"}
+    assert [model_for(t, env) for t in (TaskType.compare, TaskType.report, TaskType.summarize)] == ["small", "big", "base"]
+    assert model_for(TaskType.summarize, {"ATS_EXECUTOR_MODELS": ""}) == DEFAULT_EXECUTOR_MODEL
+    with pytest.raises(ValueError):
+        model_for(TaskType.report, {"ATS_EXECUTOR_MODELS": "nonsense"})
+    with pytest.raises(ValueError):
+        model_for(TaskType.report, {"ATS_EXECUTOR_MODELS": "search=x"})
+
+
+def test_executor_uses_its_types_model(monkeypatch):
+    monkeypatch.delenv("ATS_EXECUTOR_MODEL", raising=False)
+    monkeypatch.delenv("ATS_EXECUTOR_MODELS", raising=False)
+    client = FakeGroq()
+    run(LLMExecutor(TaskType.summarize, client=client), msg(type="summarize"))
+    assert client.calls[0]["model"] == SMALL_EXECUTOR_MODEL
+    assert LLMExecutor(TaskType.summarize, model="x", client=client).model == "x"  # explicit wins
+
+
+def test_long_inputs_are_shortened_with_their_key_points():
+    long = {"content": "intro\n" + "fact line\n" * 400, "key_points": ["p1", "p2"], "final_answer": "42"}
+    text = input_text(long, 1000)
+    assert len(text) < 1200 and "[... shortened]" in text and "- p1\n- p2" in text and text.endswith("Answer: 42")
+    short = {"content": "short", "key_points": ["p1"]}
+    assert input_text(short, 1000) == "short"  # untouched: key points only when cut
+    assert input_text(long, 0).count("fact line") == 400  # 0 = no limit
+
+
+def test_input_budget_is_split_across_inputs():
+    assert input_budget(2, {}) == 3000
+    assert input_budget(20, {}) == 800  # floor per input
+    assert input_budget(3, {"ATS_INPUT_BUDGET_CHARS": "0"}) == 0
+    message = build_user_message(msg(inputs=["t1", "t2"]), {
+        "t1": {"content": "a" * 10000, "key_points": []}, "t2": {"content": "b" * 10, "key_points": []}})
+    assert message.count("a") < 3100 and "b" * 10 in message
+
+
+def test_final_answer_is_part_of_the_schema_and_kept():
+    assert "final_answer" in LLM_OUTPUT_SCHEMA["required"]
+    assert parse_output(json.dumps({"content": "c", "key_points": [], "final_answer": " Paris "}))["final_answer"] == "Paris"
+    assert "final_answer" not in parse_output(json.dumps({"content": "c", "key_points": [], "final_answer": None}))
+    assert "final_answer" not in parse_output(json.dumps({"content": "c", "key_points": []}))  # older outputs
+

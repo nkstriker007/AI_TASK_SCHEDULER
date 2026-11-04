@@ -72,7 +72,12 @@ Live planning with Groq: create `.env` in the repo root (it is gitignored) with
 ```bash
 GROQ_API_KEY=<your key>
 ATS_PLANNER_MODEL=openai/gpt-oss-120b   # optional, this is the default
-ATS_EXECUTOR_MODEL=openai/gpt-oss-120b  # optional, model for the LLM executor
+# optional, executor models (D58). Default: summarize and report on openai/gpt-oss-20b, the rest on
+# openai/gpt-oss-120b. ATS_EXECUTOR_MODEL alone puts every type on one model; ATS_EXECUTOR_MODELS maps
+# types ("summarize=openai/gpt-oss-20b,report=openai/gpt-oss-120b"), and "" turns the map off.
+# ATS_EXECUTOR_MODEL=openai/gpt-oss-120b
+# ATS_EXECUTOR_MODELS=summarize=openai/gpt-oss-20b,report=openai/gpt-oss-20b
+# ATS_INPUT_BUDGET_CHARS=6000            # dependency results per task, split across inputs; 0 = no limit
 ```
 
 The planner does not load `.env` itself, so pass it with `--env-file`:
@@ -190,6 +195,9 @@ python3 -c "import json;print(json.dumps(json.load(open('examples/plans/company_
   | curl -s -X POST localhost:8000/plans -H 'content-type: application/json' -d @-
 # typed request, planned by Groq (needs GROQ_API_KEY in .env; ATS_PLANNER=fake make up for offline)
 curl -s -X POST localhost:8000/requests -H 'content-type: application/json' -d '{"text": "Research Apple and NVIDIA and compare them"}'
+# a simple request is answered by one LLM call, no planner, no atsd ("mode": "direct" in the reply, D58);
+# "mode": "workflow" forces the plan, "mode": "direct" forces one call, ATS_FAST_PATH=0 turns the automatic choice off
+curl -s -X POST localhost:8000/requests -H 'content-type: application/json' -d '{"text": "What is a DAG?"}'
 curl -s localhost:8000/requests/<request_id>          # status, per-task states, token usage, final output
 curl -s 'localhost:8000/requests/<request_id>?include_outputs=true'   # + every completed task's output
 curl -s localhost:8000/requests/<request_id>/report   # the final report as Markdown (409 until it succeeds)
@@ -241,7 +249,7 @@ docs/contract.md                 contract #1: plan file format, issue codes, par
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
 docs/REPORT.md                   architecture, decisions, results (E1–E8), limitations
 docs/DEMO.md                     demo / video script
-docs/DECISIONS.md                decisions made during the build (D15, D17–D57)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D58)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -273,6 +281,7 @@ worker/                          Python worker (Person A, Day 3)
   Dockerfile, tests/
 api/                             FastAPI service (Person A, Day 3)
   api/app.py                     POST /requests, POST /plans, GET /requests/{id}, GET /healthz
+  api/direct.py                  fast path: a simple request answered by one LLM call (D58)
   api/status.py                  merges plan:<id>, request:<id> and the sink's result
   Dockerfile, tests/
 scheduler/                       C++20 runtime (Person B)
@@ -503,3 +512,12 @@ make bench                                   # simulator sweep + E4 plots
 make up-llm && make live-bench               # E7 + E8 on real Groq (~30 min on the 8k tokens/min tier)
 make demo-llm REQUEST="Research the top 3 AI chip companies and write a short report comparing them"
 ```
+
+## After the measurements: latency and answer-format changes (D58)
+
+- [x] Model per task type: summarize and report on `openai/gpt-oss-20b` (Groq's limits are per model), the rest on `gpt-oss-120b`
+- [x] Compact inputs: a task's dependency results share 6,000 characters (cut at a line break, followed by their key points)
+- [x] Fast path: `POST /requests` answers a simple request with one direct call (`mode`: `auto` | `workflow` | `direct`)
+- [x] Structured `final_answer` in every output; the report shows it first and E9 reads it before parsing text
+- [ ] Measure the effect: re-run E7 (latency, tokens) and E9 (accuracy, especially with report on the 20b model)
+

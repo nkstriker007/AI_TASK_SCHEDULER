@@ -1,4 +1,4 @@
-# Build from the repo root (the API depends on the planner package):
+# Build from the repo root (the API depends on the planner and worker packages):
 #   docker build -f api/Dockerfile -t ats-api .
 FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /bin/uv
@@ -6,6 +6,7 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY planner/ planner/
+COPY worker/ worker/
 COPY api/ api/
 RUN cd api && uv sync --frozen --no-dev
 

@@ -52,6 +52,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "ats-planner" },
+    { name = "ats-worker" },
     { name = "fastapi" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
@@ -66,6 +67,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ats-planner", editable = "../planner" },
+    { name = "ats-worker", editable = "../worker" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "redis", specifier = ">=5.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
@@ -92,6 +94,26 @@ requires-dist = [
     { name = "groq", specifier = ">=0.30" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8" }]
+
+[[package]]
+name = "ats-worker"
+version = "0.1.0"
+source = { editable = "../worker" }
+dependencies = [
+    { name = "ats-planner" },
+    { name = "groq" },
+    { name = "redis" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ats-planner", editable = "../planner" },
+    { name = "groq", specifier = ">=0.30" },
+    { name = "redis", specifier = ">=5.0" },
 ]
 
 [package.metadata.requires-dev]

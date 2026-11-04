@@ -34,6 +34,14 @@ from .base import ExecutionContext, ExecutionResult, Executor, PermanentError, R
 
 DEFAULT_EXECUTOR_MODEL = "openai/gpt-oss-120b"
 EXECUTOR_MODEL_ENV = "ATS_EXECUTOR_MODEL"
+# Model per task type (D58). Groq's rate limits are per model, so moving the short writing tasks
+# to a smaller model takes them off the large model's tokens-per-minute budget and makes them
+# faster. ATS_EXECUTOR_MODELS="summarize=<model>,report=<model>" overrides the map; "" turns it
+# off; setting only ATS_EXECUTOR_MODEL runs every type on that one model.
+SMALL_EXECUTOR_MODEL = "openai/gpt-oss-20b"
+TYPE_MODELS_ENV = "ATS_EXECUTOR_MODELS"
+DEFAULT_TYPE_MODELS: dict[TaskType, str] = {TaskType.summarize: SMALL_EXECUTOR_MODEL,
+                                            TaskType.report: SMALL_EXECUTOR_MODEL}
 # gpt-oss models are reasoning models; "low" uses few reasoning tokens, which matters on
 # tokens-per-minute rate limits (Groq: low | medium | high, gpt-oss only). "" sends nothing.
 EXECUTOR_REASONING_ENV = "ATS_EXECUTOR_REASONING"
@@ -48,8 +56,11 @@ LLM_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "content": {"type": "string"},
         "key_points": {"type": "array", "items": {"type": "string"}},
+        # The short answer when the instruction asks for one (a name, yes/no, a number, one of
+        # the given options); null otherwise. Read by the API and E9 instead of parsing text (D58).
+        "final_answer": {"type": ["string", "null"]},
     },
-    "required": ["content", "key_points"],
+    "required": ["content", "key_points", "final_answer"],
     "additionalProperties": False,
 }
 
@@ -98,6 +109,31 @@ def normalize_subplan(raw: Any) -> Any:
     return raw
 
 
+def parse_type_models(spec: str) -> dict[TaskType, str]:
+    """"summarize=openai/gpt-oss-20b, report=..." -> {TaskType.summarize: ..., ...}."""
+    out: dict[TaskType, str] = {}
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        name, sep, model = part.partition("=")
+        if not sep or not model.strip():
+            raise ValueError(f"{TYPE_MODELS_ENV}: expected type=model, got {part!r}")
+        out[TaskType(name.strip())] = model.strip()
+    return out
+
+
+def model_for(task_type: TaskType, env: dict[str, str] | None = None) -> str:
+    """The model an executor of this type uses (D58)."""
+    env = os.environ if env is None else env
+    base = env.get(EXECUTOR_MODEL_ENV) or DEFAULT_EXECUTOR_MODEL
+    spec = env.get(TYPE_MODELS_ENV)
+    if spec is None:  # no per-type setting: the defaults, unless one model was chosen for everything
+        types = {} if env.get(EXECUTOR_MODEL_ENV) else DEFAULT_TYPE_MODELS
+    else:
+        types = parse_type_models(spec)
+    return types.get(TaskType(task_type), base)
+
+
 def _prompt(name: str) -> str:
     return resources.files("worker").joinpath(f"prompts/{name}.md").read_text().strip()
 
@@ -109,6 +145,11 @@ def load_executor_prompt(task_type: TaskType) -> str:
     came last and won, which made the spliced tasks' titles sentences (found in the Day 7 E8 run)."""
     output = "output_expand" if task_type == TaskType.expand else "output"
     return "\n\n".join([_prompt("common"), _prompt(task_type.value), _prompt(output)])
+
+
+def load_direct_prompt() -> str:
+    """System prompt for the API's fast path (D58): one call answers the whole request."""
+    return "\n\n".join([_prompt("direct"), _prompt("output")])
 
 
 def load_subplan_prompt() -> str:
@@ -149,12 +190,41 @@ def _check_subplan(content: str, items: list[str] | None = None) -> tuple[dict[s
     return subplan, ""
 
 
-def input_text(value: Any) -> str:
-    """A dependency's committed result as prompt text: its "content", or JSON for anything else."""
+# Inputs (D58): a task reads every dependency's result, so a combining task after a wide fan-out
+# re-reads thousands of tokens. All inputs together get INPUT_BUDGET_CHARS (env
+# ATS_INPUT_BUDGET_CHARS, 0 = no limit), split evenly but at least INPUT_MIN_CHARS each; a longer
+# result is cut at a line break and followed by its key points, which summarize all of it.
+INPUT_BUDGET_ENV = "ATS_INPUT_BUDGET_CHARS"
+DEFAULT_INPUT_BUDGET_CHARS = 6000
+INPUT_MIN_CHARS = 800
+
+
+def input_budget(n_inputs: int, env: dict[str, str] | None = None) -> int:
+    """Characters of content per input; 0 means no limit."""
+    env = os.environ if env is None else env
+    total = int(env.get(INPUT_BUDGET_ENV, DEFAULT_INPUT_BUDGET_CHARS))
+    if total <= 0 or n_inputs <= 0:
+        return 0
+    return max(INPUT_MIN_CHARS, total // n_inputs)
+
+
+def input_text(value: Any, max_chars: int = 0) -> str:
+    """A dependency's committed result as prompt text: its "content" (shortened to `max_chars`
+    with its key points after it), or JSON for anything else."""
     if isinstance(value, dict) and isinstance(value.get("content"), str):
-        return value["content"]
+        text = value["content"]
+        if max_chars and len(text) > max_chars:
+            cut = text[:max_chars]
+            nl = cut.rfind("\n")
+            text = (cut[:nl] if nl > max_chars // 2 else cut).rstrip() + "\n[... shortened]"
+            points = [p for p in value.get("key_points") or [] if isinstance(p, str)]
+            if points:
+                text += "\nKey points:\n" + "\n".join(f"- {p}" for p in points)
+        if isinstance(value.get("final_answer"), str):
+            text += f"\nAnswer: {value['final_answer']}"
+        return text
     if isinstance(value, str):
-        return value
+        return value[:max_chars] if max_chars else value
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -166,8 +236,9 @@ def build_user_message(msg: TaskMessage, inputs: dict[str, Any]) -> str:
     parts = [f"Task type: {msg.type.value}", f"Task id: {msg.task_id}", "", "Instruction:", msg.instruction]
     if inputs:
         parts += ["", "Results of the tasks this one depends on:"]
+        limit = input_budget(len(inputs))
         for dep in sorted(inputs, key=_task_sort_key):
-            parts += ["", f"--- {dep} ---", input_text(inputs[dep])]
+            parts += ["", f"--- {dep} ---", input_text(inputs[dep], limit)]
     return "\n".join(parts)
 
 
@@ -198,7 +269,7 @@ def make_client() -> Any:
 
 
 def parse_output(content: str) -> dict[str, Any]:
-    """The model's {content, key_points} answer, checked. Malformed output is retryable (8.6)."""
+    """The model's {content, key_points[, final_answer]} answer, checked. Malformed output is retryable (8.6)."""
     try:
         value = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -209,7 +280,11 @@ def parse_output(content: str) -> dict[str, Any]:
         raise RetryableError("output has no content")
     if not isinstance(points, list) or not all(isinstance(p, str) for p in points):
         raise RetryableError("output key_points is not a list of strings")
-    return {"content": text.strip(), "key_points": [p.strip() for p in points if p.strip()]}
+    out: dict[str, Any] = {"content": text.strip(), "key_points": [p.strip() for p in points if p.strip()]}
+    answer = value.get("final_answer")
+    if isinstance(answer, str) and answer.strip():
+        out["final_answer"] = answer.strip()
+    return out
 
 
 class LLMExecutor(Executor):
@@ -217,7 +292,7 @@ class LLMExecutor(Executor):
 
     def __init__(self, task_type: TaskType, model: str | None = None, client: Any = None, clock=time.time):
         self.task_type = TaskType(task_type)
-        self.model = model or os.environ.get(EXECUTOR_MODEL_ENV, DEFAULT_EXECUTOR_MODEL)
+        self.model = model or model_for(self.task_type)
         reasoning = os.environ.get(EXECUTOR_REASONING_ENV, DEFAULT_EXECUTOR_REASONING)
         self.reasoning_effort = reasoning if reasoning and "gpt-oss" in self.model else None
         self.client = client if client is not None else make_client()

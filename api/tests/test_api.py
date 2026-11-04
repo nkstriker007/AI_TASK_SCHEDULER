@@ -17,8 +17,9 @@ def r(redis_url):
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
-def client(redis_url, planner_factory=lambda: FakePlanner(), artifacts_dir=None):
-    return TestClient(create_app(redis_url=redis_url, planner_factory=planner_factory, artifacts_dir=artifacts_dir))
+def client(redis_url, planner_factory=lambda: FakePlanner(), artifacts_dir=None, direct_executor=None, fast_path=False):
+    return TestClient(create_app(redis_url=redis_url, planner_factory=planner_factory, artifacts_dir=artifacts_dir,
+                                 direct_executor_factory=direct_executor, fast_path=fast_path))
 
 
 def queued(r):
@@ -287,3 +288,104 @@ def test_api_survives_a_redis_restart():
     finally:
         proc.terminate()
         proc.wait()
+
+
+# --- fast path (D58) -----------------------------------------------------------------------------
+
+
+class FakeDirect:
+    """Stands in for the direct LLM executor: answers, or fails `fail` times with a 429 first."""
+
+    def __init__(self, fail=0, permanent=False):
+        self.fail, self.permanent, self.calls = fail, permanent, 0
+
+    async def run(self, ctx):
+        from worker.executors.base import ExecutionResult, PermanentError, RetryableError
+
+        self.calls += 1
+        if self.permanent:
+            raise PermanentError("bad request")
+        if self.calls <= self.fail:
+            raise RetryableError("429", retry_after_ms=1)
+        return ExecutionResult(output={"content": f"answer to: {ctx.message.instruction}", "key_points": ["k"],
+                                       "final_answer": "Paris"}, tokens_in=10, tokens_out=5)
+
+
+def wait_done(c, rid, timeout=10):
+    import time
+
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        body = c.get(f"/requests/{rid}").json()
+        if body["status"] in ("SUCCEEDED", "FAILED"):
+            return body
+        time.sleep(0.02)
+    raise AssertionError("request did not finish")
+
+
+@pytest.mark.parametrize("text, simple", [
+    ("What is the capital of France?", True),
+    ("Write a short explanation of what a DAG is.", True),
+    ("Research AMD and Intel", False),
+    ("Compare Apple, NVIDIA", False),
+    ("Who is older, Federer or Nadal?", False),
+    ("List the top 5 AI chip companies", False),
+    (" ".join(["word"] * 31), False),
+])
+def test_simple_requests_are_recognised(text, simple):
+    from api.direct import is_simple
+
+    assert is_simple(text) is simple
+
+
+def test_simple_request_is_answered_directly_without_planner_or_atsd(redis_url, r):
+    fake = FakeDirect()
+    planner = FakePlanner()
+    with client(redis_url, lambda: planner, direct_executor=lambda: fake, fast_path=True) as c:
+        resp = c.post("/requests", json={"text": "What is the capital of France?"})
+        assert resp.status_code == 202
+        sub = resp.json()
+        body = wait_done(c, sub["request_id"])
+        report = c.get(f"/requests/{sub['request_id']}/report").text
+    assert sub["mode"] == "direct" and sub["planner_attempts"] == 0 and [t["id"] for t in sub["plan"]["tasks"]] == ["t1"]
+    assert planner.calls == [] and queued(r) == []  # no planner call, nothing for atsd
+    assert body["status"] == "SUCCEEDED" and body["sink"] == "t1" and body["tasks"][0]["state"] == "COMPLETED"
+    assert body["output"]["final_answer"] == "Paris" and body["usage"]["tokens_in"] == 10
+    assert "**Answer:** Paris" in report
+
+
+def test_auto_sends_multi_part_requests_to_the_workflow(redis_url, r):
+    with client(redis_url, direct_executor=lambda: FakeDirect(), fast_path=True) as c:
+        sub = c.post("/requests", json={"text": "Research Apple and NVIDIA and compare them"}).json()
+        forced = c.post("/requests", json={"text": "What is a DAG?", "mode": "workflow"}).json()
+    assert sub["mode"] == "workflow" and forced["mode"] == "workflow" and len(queued(r)) == 2
+
+
+def test_mode_direct_works_even_with_the_fast_path_off(redis_url, r):
+    with client(redis_url, direct_executor=lambda: FakeDirect(), fast_path=False) as c:
+        auto = c.post("/requests", json={"text": "What is a DAG?"}).json()
+        sub = c.post("/requests", json={"text": "Compare A and B", "mode": "direct"}).json()
+        body = wait_done(c, sub["request_id"])
+    assert auto["mode"] == "workflow" and sub["mode"] == "direct" and body["status"] == "SUCCEEDED"
+
+
+def test_direct_answer_retries_rate_limits_then_fails_permanently(redis_url, monkeypatch):
+    import api.direct as direct_module
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(direct_module.asyncio, "sleep", no_sleep)
+    flaky = FakeDirect(fail=2)
+    with client(redis_url, direct_executor=lambda: flaky) as c:
+        ok = wait_done(c, c.post("/requests", json={"text": "x", "mode": "direct"}).json()["request_id"])
+        again = wait_done(c, c.post("/requests", json={"text": "x", "mode": "direct"}).json()["request_id"])
+    assert ok["status"] == "SUCCEEDED" and ok["tasks"][0]["attempt"] == 3  # two 429s, then the answer
+    assert again["status"] == "SUCCEEDED" and again["tasks"][0]["attempt"] == 1 and flaky.calls == 4
+    with client(redis_url, direct_executor=lambda: FakeDirect(permanent=True)) as c:
+        failed = wait_done(c, c.post("/requests", json={"text": "x", "mode": "direct"}).json()["request_id"])
+    assert failed["status"] == "FAILED" and "bad request" in failed["error"]
+    with client(redis_url, direct_executor=lambda: FakeDirect(fail=99)) as c:
+        limited = wait_done(c, c.post("/requests", json={"text": "x", "mode": "direct"}).json()["request_id"])
+    assert limited["status"] == "FAILED" and limited["tasks"][0]["attempt"] == 4
+

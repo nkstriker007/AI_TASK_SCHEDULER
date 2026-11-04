@@ -60,10 +60,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       ATS_PLANNER: ${ATS_PLANNER:-groq}
       ATS_ARTIFACTS_DIR: /artifacts
+      ATS_FAST_PATH: ${ATS_FAST_PATH:-1}          # simple requests answered with one call (D58); 0 = off
     volumes:
       - ./artifacts:/artifacts
     env_file:
-      - path: .env          # GROQ_API_KEY, ATS_PLANNER_MODEL
+      - path: .env          # GROQ_API_KEY, ATS_PLANNER_MODEL, ATS_EXECUTOR_MODEL
         required: false
     ports:
       - "8000:8000"
@@ -90,8 +91,11 @@ services:
       SIM_FAULT_STRAGGLER_RATE: ${SIM_FAULT_STRAGGLER_RATE:-}
       SIM_FAULTS: ${SIM_FAULTS:-}
       SIM_FAULT_SEED: ${SIM_FAULT_SEED:-0}
+      ATS_INPUT_BUDGET_CHARS: ${ATS_INPUT_BUDGET_CHARS:-6000}   # dependency results per task (D58); 0 = no limit
     env_file:
-      - path: .env          # GROQ_API_KEY, ATS_EXECUTOR_MODEL (llm workers only)
+      # GROQ_API_KEY, ATS_EXECUTOR_MODEL, ATS_EXECUTOR_MODELS (llm workers only). ATS_EXECUTOR_MODELS is
+      # set here, not above: unset means the per-type defaults (D58), while "" turns them off.
+      - path: .env
         required: false
     volumes:
       - ./artifacts:/artifacts

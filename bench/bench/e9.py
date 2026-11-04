@@ -17,8 +17,10 @@ Every question runs in two modes on the same model:
   single     one LLM call answers the question
 
 Both get the same question text with the same answer-format instruction ("end with 'Final answer:
-...'"). The final answer is read from that line; if a mode's output has none, one small extraction
-call reads it, counted against that mode. Scoring follows LLMCompiler's evaluation: a numeric
+...'"). The workflow's final task also returns the answer as a structured field (`final_answer`,
+D58), which is used when present (`extracted` = "field"); otherwise the answer is read from that
+line ("line"), and if there is none, one small extraction call reads it ("llm"), counted against
+that mode. Scoring follows LLMCompiler's evaluation: a numeric
 reference is matched within 10 %, anything else by exact match after normalising case,
 punctuation, articles and spaces (`correct`); token-F1 is reported too (`f1`, as in HotpotQA). For
 the movie set, an answer that names exactly one of the options is scored as that option.
@@ -213,6 +215,7 @@ def run_workflow(request: str, api: str) -> dict[str, Any]:
     run = live.run_on_stack(planned.plan, api)
     return {"status": run.status, "seconds": planned.seconds + run.seconds, "planner_s": planned.seconds,
             "tasks": len(planned.plan.tasks), "text": live.output_text(run.output) if run.output is not None else "",
+            "final_answer": run.output.get("final_answer") if isinstance(run.output, dict) else None,
             "tokens_in": planned.tokens_in + run.tokens_in, "tokens_out": planned.tokens_out + run.tokens_out,
             "llm_calls": planned.calls + run.llm_calls, "retries": run.retries, "request_id": run.request_id}
 
@@ -266,7 +269,9 @@ def run(datasets: list[str], per_dataset: int, out: Path, api: str, budget_token
                 if cooldown > 0:
                     sleep(cooldown)
                 r = workflow(request, api) if mode == "workflow" else asyncio.run(single(request))
-                if r["status"] == "SUCCEEDED":
+                if r["status"] == "SUCCEEDED" and isinstance(r.get("final_answer"), str) and r["final_answer"].strip():
+                    answer, how, extra = r["final_answer"].strip(), "field", (0, 0, 0)  # structured (D58)
+                elif r["status"] == "SUCCEEDED":
                     answer, how, extra = asyncio.run(extract(r["text"], item["question"]))
                 else:
                     answer, how, extra = None, "-", (0, 0, 0)

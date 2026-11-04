@@ -1,6 +1,8 @@
 """HTTP API (design doc 8.10).
 
-    POST /requests {"text": ...}   plan with the LLM, validate, enqueue
+    POST /requests {"text": ..., "mode": "auto"|"workflow"|"direct"}
+                                   plan with the LLM, validate, enqueue; or, for a simple request
+                                   (mode auto) or mode direct, answer with one LLM call (D58)
     POST /plans    {ExecutionPlan} validate and enqueue a hand-written plan (benchmarks, tests)
     GET  /requests/{request_id}    status, per-task states, token usage, final output once the sink
                                    completes (?include_outputs=true adds every completed task's output)
@@ -15,16 +17,18 @@ Configuration (environment):
     ATS_PLANNER          "groq" (default; needs GROQ_API_KEY) or "fake"
     ATS_FAKE_FIXTURE     fixture returned by the fake planner (default company_research)
     ATS_ARTIFACTS_DIR    where workers spill large results (default artifacts; shared volume)
+    ATS_FAST_PATH        "0" stops mode auto from answering simple requests directly (default on)
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from pathlib import Path
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -44,6 +48,7 @@ from planner.messages import REQUEST_ID_PATTERN, STREAM_FIELD
 from planner.schema import ExecutionPlan, ValidationIssue
 from planner.validate import validate_plan
 
+from . import direct
 from .status import SUBMITTED, render_report, request_status
 
 MAX_REQUEST_CHARS = 4000
@@ -51,6 +56,8 @@ MAX_REQUEST_CHARS = 4000
 
 class CreateRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_REQUEST_CHARS)
+    # auto: one direct LLM call for a simple request (short, about one thing), else the workflow
+    mode: Literal["auto", "workflow", "direct"] = "auto"
 
 
 def planner_from_env() -> Callable[[], Planner]:
@@ -98,7 +105,8 @@ def _accepted(request_id: str, plan: ExecutionPlan, warnings: list[ValidationIss
 
 
 def create_app(redis_url: str | None = None, planner_factory: Callable[[], Planner] | None = None,
-               artifacts_dir: Path | None = None) -> FastAPI:
+               artifacts_dir: Path | None = None, direct_executor_factory: Callable[[], Any] | None = None,
+               fast_path: bool | None = None) -> FastAPI:
     redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     artifacts_dir = artifacts_dir or artifacts_root()
 
@@ -111,9 +119,15 @@ def create_app(redis_url: str | None = None, planner_factory: Callable[[], Plann
             retry=Retry(ExponentialBackoff(cap=2.0, base=0.1), retries=5),
             retry_on_error=[RedisConnectionError, RedisTimeoutError])
         app.state.planner_factory = planner_factory or planner_from_env()
+        app.state.direct_executor_factory = direct_executor_factory or direct.default_executor
+        app.state.fast_path = direct.fast_path_enabled() if fast_path is None else fast_path
+        app.state.direct_tasks = set()  # answers in progress; kept so they are not garbage-collected
         try:
             yield
         finally:
+            for task in list(app.state.direct_tasks):
+                task.cancel()
+            await asyncio.gather(*app.state.direct_tasks, return_exceptions=True)
             await app.state.redis.aclose()
 
     app = FastAPI(title="AI Task Scheduler", version="0.1.0", lifespan=lifespan)
@@ -133,6 +147,14 @@ def create_app(redis_url: str | None = None, planner_factory: Callable[[], Plann
 
     @app.post("/requests", status_code=202)
     async def submit_request(request: Request, body: CreateRequest):
+        state = request.app.state
+        if body.mode == "direct" or (body.mode == "auto" and state.fast_path and direct.is_simple(body.text)):
+            try:
+                plan_file = await direct.submit(state.redis, body.text, state.direct_executor_factory, artifacts_dir,
+                                                state.direct_tasks)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=f"{exc}, retry") from exc
+            return _accepted(plan_file.request_id, plan_file.plan, [], planner_attempts=0, mode="direct")
         planner = request.app.state.planner_factory()
         try:
             # The Groq SDK is synchronous; keep it off the event loop.
@@ -143,7 +165,7 @@ def create_app(redis_url: str | None = None, planner_factory: Callable[[], Plann
             raise HTTPException(status_code=502, detail=f"planner provider error: {exc}") from exc
         warnings = validate_plan(plan.model_dump(mode="json", exclude_none=True)).warnings
         request_id = await enqueue(request.app.state.redis, plan)
-        return _accepted(request_id, plan, warnings, planner_attempts=planner.last_attempts)
+        return _accepted(request_id, plan, warnings, planner_attempts=planner.last_attempts, mode="workflow")
 
     async def _status(request: Request, request_id: str, include_outputs: bool = False) -> dict:
         if not re.fullmatch(REQUEST_ID_PATTERN, request_id):

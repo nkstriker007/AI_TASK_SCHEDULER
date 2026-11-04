@@ -287,6 +287,26 @@ def test_e9_loop_scores_both_modes_alternates_order_and_resumes(tmp_path):
     assert calls == [] and len(rows) == 6
 
 
+def test_e9_prefers_the_workflows_structured_final_answer(tmp_path):
+    d, out, calls = _yes_no_dataset(tmp_path, 1), tmp_path / "e9.csv", []
+    single, workflow, extract = _fake_modes(calls)
+
+    def structured(request, api):  # the text says "no", the structured field says "yes" (D58)
+        return {**workflow(request, api), "final_answer": "Yes"}
+
+    extracted = []
+
+    async def tracking_extract(text, question):
+        extracted.append(text)
+        return await extract(text, question)
+
+    rows = e9.run(["hotpotqa_comparison"], 1, out, "http://x", 10**9, 0, single=single, workflow=structured,
+                  extract=tracking_extract, datasets_dir=d)
+    by = {r["mode"]: r for r in rows}
+    assert by["workflow"]["extracted"] == "field" and by["workflow"]["correct"] == 1
+    assert by["single"]["extracted"] == "line" and extracted == ["Final answer: yes"]  # only single was parsed
+
+
 def test_e9_loop_stops_at_the_token_budget_and_continues_later(tmp_path):
     d, out, calls = _yes_no_dataset(tmp_path, 4), tmp_path / "e9.csv", []
     single, workflow, extract = _fake_modes(calls)

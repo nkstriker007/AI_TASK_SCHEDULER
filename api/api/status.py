@@ -155,6 +155,8 @@ async def request_status(redis: Redis, request_id: str, artifacts_root: Path | N
 def _section(value: Any) -> str:
     if isinstance(value, dict) and isinstance(value.get("content"), str):
         text = value["content"].strip()
+        if isinstance(value.get("final_answer"), str) and value["final_answer"].strip():
+            text = f"**Answer:** {value['final_answer'].strip()}\n\n{text}"
         points = [p for p in value.get("key_points") or [] if isinstance(p, str)]
         if points:
             text += "\n\n**Key points**\n\n" + "\n".join(f"- {p}" for p in points)

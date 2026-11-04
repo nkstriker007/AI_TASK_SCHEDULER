@@ -5,6 +5,7 @@ description = "AI Task Scheduler API: plan and submit requests, serve status and
 requires-python = ">=3.11"
 dependencies = [
     "ats-planner",
+    "ats-worker",  # fast path (D58): the LLM executor and result helpers
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "redis>=5.0",
@@ -15,6 +16,7 @@ dev = ["pytest>=8", "httpx2"]
 
 [tool.uv.sources]
 ats-planner = { path = "../planner", editable = true }
+ats-worker = { path = "../worker", editable = true }
 
 [build-system]
 requires = ["hatchling"]
