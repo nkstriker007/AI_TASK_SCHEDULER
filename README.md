@@ -137,6 +137,7 @@ table for every experiment); `docs/REPORT.md` interprets them.
 | `make bench-e5` | **E5** (speculative execution on a straggler fan-out, 40 paired seeds: p50 / p95 / p99 makespan, extra worker time) and the **latency profile** (p50 / p95 / p99 per scheduling step); `REPEATS=10` for a quick run | ~3.5 min | free |
 | `make chaos` | **E6** (fault tolerance: completion, retries, lost attempts, duplicate commits) | a few minutes | free, Docker |
 | `make up-llm && make live-bench` | **E7** (real requests: distributed vs a sequential agent vs one large call) and **E8** (runtime expansion vs a static plan) | ~30 min | Groq free tier (rate-limited; 200k tokens/day) |
+| `make latency-breakdown` | where each E9 workflow request's time went, along its critical path: planner, waiting for a slot or a 429 pause, retries and backoff, worker pickup, the LLM call, submit and polling (`bench/results/e9_breakdown.csv`) | seconds | free (reads atsd's log in `./runs`; stack running) |
 | `make up-llm && make bench-e9 N=10` | **E9** (answer accuracy on public datasets with reference answers: the workflow vs one normal LLM call, same model and question; by number of entities); stops at `BUDGET` tokens and continues on the next run | ~30–60 min for N=10 | Groq free tier (~1 day's budget for 30 questions × 2 modes) |
 
 Sim tasks are timed sleeps, so E1–E6 are free and repeatable and isolate the runtime's own cost; E7 and E8
@@ -294,6 +295,7 @@ bench/                           benchmarks, design doc 11 (Person A, Day 6)
   bench/sim.py also runs E4      critical path vs FIFO on 100 random layered DAGs -> results/e4.csv
   bench/e5.py                    E5: speculation on a straggler fan-out, paired seeds; p50/p95/p99 latency profile
   bench/e9.py                    E9: accuracy on public datasets, workflow vs one LLM call (Groq)
+  bench/breakdown.py             critical-path latency breakdown of workflow requests from atsd's event log
   bench/datasets/                ParallelQA, HotpotQA comparison and movie recommendation samples, with sources and licenses
   bench/e7.py                    E7: real requests, distributed vs sequential agent vs one large call (Groq)
   bench/e8.py                    E8: open-ended requests, runtime expansion vs a static plan (Groq)

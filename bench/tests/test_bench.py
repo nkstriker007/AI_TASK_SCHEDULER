@@ -312,3 +312,67 @@ def test_e9_summary_and_chart(tmp_path):
     assert "| ParallelQA | single LLM call | 4 | 100% |" in text
     assert "By number of entities" in text and "| ParallelQA | 3 | 100% (2) |" in text
     assert analyze.e9_accuracy(rows, tmp_path).exists()
+
+
+# --------------------------------------------------------------------------------- latency breakdown
+
+from bench import breakdown  # noqa: E402
+
+
+def _ev(ts, event, task=None, attempt=0):
+    e = {"ts_ms": ts, "event": event, "request": "req_b"}
+    if task:
+        e["task"] = task
+    if attempt:
+        e["attempt"] = attempt
+    return e
+
+
+def test_breakdown_walks_the_critical_path_and_splits_each_task():
+    # t1 and t2 start together; t2 fails once (429, 3 s pause), is retried, finishes last; t3 needs both.
+    events = [
+        _ev(1000, "request_accepted"),
+        _ev(1000, "dispatched", "t1", 1), _ev(1000, "dispatched", "t2", 1),
+        _ev(1010, "started", "t1", 1), _ev(1010, "started", "t2", 1),
+        _ev(2000, "completed", "t1", 1),
+        _ev(2500, "capability_paused", "t2", 1), _ev(2500, "retry_scheduled", "t2", 1),
+        _ev(5500, "dispatched", "t2", 2), _ev(5520, "started", "t2", 2), _ev(7520, "completed", "t2", 2),
+        _ev(9000, "dispatched", "t3", 1),  # slot freed late
+        _ev(9030, "started", "t3", 1), _ev(12030, "completed", "t3", 1),
+    ]
+    deps = {"t1": [], "t2": [], "t3": ["t1", "t2"]}
+    b = breakdown.breakdown(events, deps)
+    assert b["path"] == ["t2", "t3"]                      # t1 finished first: not on the path
+    assert b["retries"] == 4.5                            # t2: first dispatch 1.0 s -> retry dispatch 5.5 s
+    assert b["slot_wait"] == 1.48                         # t3: ready 7.52 s -> dispatched 9.0 s
+    assert round(b["pickup"], 3) == 0.05                  # 0.02 + 0.03
+    assert b["llm_call"] == 5.0                           # t2 attempt 2: 2.0 s, t3: 3.0 s
+    assert b["atsd_s"] == 11.03 and b["pauses_429"] == 1
+
+    r = breakdown.row("req_b", events, deps, planner_s=3.0, latency_s=15.0)
+    assert r["submit_poll_s"] == 0.97                     # 15 - 3 - (4.5 + 1.48 + 0.05 + 5.0)
+    text = breakdown.report([r])
+    assert "| retries + backoff | 4.5 | 30% |" in text and "| planner | 3.0 | 20% |" in text
+
+
+def test_breakdown_knows_spliced_tasks_and_joins():
+    tasks = [{"id": "t1", "depends_on": []}, {"id": "t2", "depends_on": ["t1"]},
+             {"id": "t1.1", "depends_on": None}, {"id": "t1.2", "depends_on": None}, {"id": "t1.join", "depends_on": None}]
+    deps = breakdown.dependencies(tasks)
+    assert deps == {"t1": [], "t2": ["t1.join"], "t1.1": ["t1"], "t1.2": ["t1"], "t1.join": ["t1.1", "t1.2"]}
+    events = [_ev(0, "request_accepted"), _ev(0, "dispatched", "t1", 1), _ev(1000, "completed", "t1", 1),
+              _ev(1000, "dispatched", "t1.1", 1), _ev(1000, "dispatched", "t1.2", 1),
+              _ev(2000, "completed", "t1.1", 1), _ev(4000, "completed", "t1.2", 1),
+              _ev(4000, "join_completed", "t1.join"), _ev(4001, "dispatched", "t2", 1), _ev(6001, "completed", "t2", 1)]
+    b = breakdown.breakdown(events, deps)
+    assert b["path"] == ["t1", "t1.2", "t1.join", "t2"]
+    assert b["llm_call"] == 6.0 and b["slot_wait"] == 0.001
+
+
+def test_breakdown_reads_the_runs_directory(tmp_path):
+    d = tmp_path / "runs" / "20261103T000000Z"
+    d.mkdir(parents=True)
+    (d / "events.jsonl").write_text(json.dumps(_ev(1, "request_accepted")) + "\nnot json\n"
+                                    + json.dumps({"ts_ms": 2, "event": "x", "request": "other"}) + "\n")
+    by = breakdown.read_events(tmp_path / "runs")
+    assert set(by) == {"req_b", "other"}

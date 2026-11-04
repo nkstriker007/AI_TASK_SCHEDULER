@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist bench-e5 bench-e9 live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
+.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist bench-e5 bench-e9 latency-breakdown live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -93,6 +93,11 @@ bench-e5: build
 #   make bench-e9 N=10 BUDGET=150000
 bench-e9:
 	cd bench && uv run --env-file ../.env python -m bench.e9 --per-dataset $(or $(N),10) --budget-tokens $(or $(BUDGET),150000) && uv run python -m bench.analyze
+
+# Where did each E9 workflow request's latency go? Critical-path breakdown (planner, slot wait / 429
+# pauses, retries, pickup, LLM call) from atsd's event log in ./runs; needs the stack's API running.
+latency-breakdown:
+	cd bench && uv run python -m bench.breakdown --runs ../runs
 
 # E7 and E8 on real Groq calls against the running LLM stack (make up-llm first). Slow on the 8k
 # tokens/min tier: a cooldown before every mode keeps one mode's 429s out of the next (~30 min).
