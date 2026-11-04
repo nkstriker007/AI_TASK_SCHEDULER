@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -65,6 +66,14 @@ struct ServiceConfig {
   // Dynamic expansion limits (design doc 8.11, D53); an expand result over them fails the expand task.
   int maxExpansions = 3;                // expansions per request
   std::size_t maxRequestTasks = 100;    // tasks per request after all expansions (join nodes not counted)
+  // Speculative execution (design doc 8.8, D56). Off by default. When on, a RUNNING attempt that has
+  // run longer than speculationFactor x the speculationQuantile of completed attempts of its task
+  // type (at least speculationMinSamples of them) gets one backup attempt, but only with capacity
+  // left after normal dispatch. The first committed result wins (SET NX, pure tasks).
+  bool speculation = false;
+  double speculationFactor = 1.5;
+  double speculationQuantile = 0.9;
+  std::size_t speculationMinSamples = 5;
   std::int64_t janitorIntervalMs = 30'000;
   std::int64_t janitorMinIdleMs = 60'000;
 };
@@ -90,6 +99,7 @@ class Service {
     std::size_t resumed = 0, restoredTasks = 0;  // requests picked up again after a restart (D44)
     std::size_t janitorRuns = 0, janitorAcked = 0;  // D49
     std::size_t expansions = 0, splicedTasks = 0, rejectedExpansions = 0;  // D53
+    std::size_t speculativeAttempts = 0, speculativeWins = 0, backupTakeovers = 0;  // D56
     std::size_t dispatched = 0, retries = 0, lostAttempts = 0;
     std::size_t duplicateCompletions = 0, ignoredEvents = 0;
   };
@@ -154,6 +164,13 @@ class Service {
   std::int64_t backoffFor(const std::string& capability, int attempt);
   bool attemptResolved(const std::string& data);
   bool restoreNode(RequestRun& req, NodeId n);
+  void speculate();
+  void dispatchBackup(RequestRun& req, NodeId n, std::int64_t runningMs, double thresholdMs);
+  void releaseBackup(RequestRun& req, NodeId n);
+  bool promoteBackup(RequestRun& req, NodeId n);
+  void recordDuration(const std::string& type, std::int64_t ms);
+  std::optional<double> durationQuantile(const std::string& type) const;
+  std::string taskMessage(const RequestRun& req, NodeId n, int attempt, std::int64_t deadlineMs) const;
   bool spliceExpansion(RequestRun& req, NodeId e, const std::string& worker, int attempt);
 
   Bus& bus_;
@@ -172,6 +189,7 @@ class Service {
   std::shared_ptr<std::uint64_t> readyTickets_ = std::make_shared<std::uint64_t>(0);  // shared by every Scheduler
   bool draining_ = false;
   std::int64_t nextJanitorMs_ = 0;
+  std::map<std::string, std::deque<std::int64_t>> durations_;  // task type -> recent attempt durations (D56)
   Stats stats_;
 };
 

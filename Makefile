@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
+.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist bench-e5 live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -81,6 +81,11 @@ bench: build
 
 bench-dist: bench
 	cd bench && uv run python -m bench.run $(if $(REPEATS),--repeats $(REPEATS),) && uv run python -m bench.analyze
+
+# E5: speculative execution on a straggler fan-out (real atsd + Redis + sim workers, ~3 min for
+# 40 paired seeds), plus the p50/p95/p99 latency profile. make bench-e5 REPEATS=10 for a quick run.
+bench-e5: build
+	cd bench && uv run python -m bench.e5 $(if $(REPEATS),--repeats $(REPEATS),) && uv run python -m bench.analyze
 
 # E7 and E8 on real Groq calls against the running LLM stack (make up-llm first). Slow on the 8k
 # tokens/min tier: a cooldown before every mode keeps one mode's 429s out of the next (~30 min).

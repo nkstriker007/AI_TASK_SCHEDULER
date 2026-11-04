@@ -58,7 +58,7 @@ The full log with rationale is `docs/DECISIONS.md` (D1–D14 in the design doc, 
 |---|---|
 | Correctness | **Tasks are pure** (D3) and results are committed with `SET NX`: retries, duplicate deliveries and late events can never produce two results, so at-least-once delivery is enough. **Deadlines are the only lost-attempt detector** (D10); heartbeats are for observability. |
 | Planning | Strict structured output guarantees the plan's shape, never its meaning, so every plan goes through the validator; **one repair**, then reject (D8). Valid plans with one final task missing or placeholder fan-out after an expand are repaired too, but never rejected (D54). |
-| Scheduling | Policies are objects behind `push/pop` (D20); across requests atsd uses fair share by default (D41) and holds a request back only when its next task's capability is full (D42). |
+| Scheduling | Policies are objects behind `push/pop` (D20); across requests atsd uses fair share by default (D41) and holds a request back only when its next task's capability is full (D42). Optional speculative execution starts one backup for an attempt running past 1.5x its type's p90, using only spare capacity (D56). |
 | LLM limits | Groq's on_demand tier allows 8,000 tokens/min: at most 2 LLM calls in flight, 6 attempts (D38); a 429's `retry_after_ms` pauses the whole capability (D39); backoff doubles 2–32 s so a full minute's window can pass (D45). The SDK's own retries are off: retries belong to atsd (8.6). |
 | Operations | Clean shutdown drains (D43); unfinished requests resume after an atsd restart from committed results (D44); a janitor acknowledges entries left pending by dead workers (D49); Redis clients reconnect (D40). |
 | Results | Results are JSON `{content, key_points}`; over 64 KB they spill to an artifact file (D36); token usage per task is recorded (D37). Research answers come from model knowledge only (D15). |
@@ -126,9 +126,38 @@ slightly worse (−1.9 %). On straggler-16 (one 10x task) it starts the long tas
 
 ### E5: does speculation cut tail latency?
 
-**Not done.** Speculative execution was a stretch goal and was not implemented. The design is safe
-by construction (pure tasks, first `SET NX` wins), so a backup attempt could be added without
-changing the commit path.
+16 tasks of 2 s and a join on 16 workers, the real atsd, Redis and sim workers at 1/10 time scale
+(`bench/e5.py`, `make bench-e5`). Every attempt straggles (runs 10x longer) with probability 10 %,
+decided per attempt id, so each seed runs twice, without and with speculation (D56), with the
+same primary attempts straggling; a backup is a new attempt id and gets a fresh draw. 40 seeds:
+
+| mode | p50 | p95 | p99 | max | backups (won) |
+|---|---|---|---|---|---|
+| no speculation | 2.21 s | 2.22 s | 3.32 s | 4.02 s | – |
+| speculation | **0.83 s** | 2.22 s | **2.47 s** | 2.63 s | 82 (68) |
+
+Speculation cuts the **median makespan by 63 %** and the p99 by 26 %, for a median of **+6 %
+extra worker time** (paired by seed; p95 +32 %). It does **not** move the p95, for a reason the
+runs show directly: a backup straggles too in 10 % of cases, and atsd starts at most one backup
+per task, so the ~30 % of runs where some backup was also slow stay at the straggler's 2.2 s
+(12 of 40). The single join task never got a backup (seed 6): the p90 is per task type and needs 5
+completed samples, and the join is the only `report` task. Losing attempts run to completion
+(there is no cancel), which is where the extra worker time goes. With 40 runs per mode the p99 is
+close to the maximum: indicative, not tight.
+
+![E5](../bench/results/e5_tail.png)
+
+**Latency profile** (all E5 runs, 1,442 attempts; one host, so worker and atsd clocks agree):
+
+| step | p50 | p95 | p99 |
+|---|---|---|---|
+| pickup: atsd dispatches → worker reports `task_started` | 1 ms | 2 ms | 3 ms |
+| report: worker reports `task_completed` → atsd records it | 1 ms | 2 ms | 3 ms |
+| handoff: last parent completes → child dispatched | 2 ms | 3 ms | 3.2 ms |
+
+Each Redis hop plus atsd's loop costs about a millisecond; a full scheduling step between two
+dependent tasks is 2–3 ms, consistent with E3's 3–6 ms per step (which also includes the worker
+writing and reading results).
 
 ### E6: is it fault tolerant?
 
@@ -251,7 +280,10 @@ Reading it:
   E1/E3 overhead is an upper bound for separate worker processes. E4 runs in the simulator only.
 - **A subplan stored as an artifact (> 64 KB) cannot be spliced**, because atsd has no artifacts volume;
   20 tasks of this schema stay far below that.
-- **Not implemented**: speculative execution (E5) and the dashboard (stretch goals); one Redis
+- **Speculation starts at most one backup per task** and never cancels the loser (E5): it cuts the
+  median, not the p95, when backups can straggle too; a task type with fewer than 5 completed
+  attempts (a single join) never gets a backup.
+- **Not implemented**: the dashboard (stretch goal); one Redis
   instance (no Redis HA); one atsd per Redis (no scheduler failover beyond restart recovery).
 
 ## 5. How to reproduce
@@ -260,6 +292,7 @@ Reading it:
 make build && make test          # C++ + Python unit, parity, integration (incl. atsd end to end)
 make bench                       # simulator sweep + E4 -> bench/results/*.png, summary.md
 make bench-dist                  # + E1–E3 with the real atsd and Redis (~1 min)
+make bench-e5                    # E5 + latency profile with the real atsd and Redis (~3.5 min)
 make chaos                       # E6 on the Docker stack
 make up-llm                      # real Groq stack (GROQ_API_KEY in .env)
 cd bench && uv run --env-file ../.env python -m bench.e7   # E7 (~15 min, rate-limited)

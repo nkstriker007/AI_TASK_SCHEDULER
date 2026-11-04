@@ -76,3 +76,22 @@ Efficiency falls below 50% for tasks shorter than about **3 ms**.
 | trending_databases | expand | 187.02 | 10 (-) | Milvus; Qdrant; Weaviate; FAISS; Annoy; Elasticsearch kNN plugin; Vespa; Pinecone‑DB; Typesense (vector extension); OpenSearch kNN | 2646 | 1 | 20803 / 11769 | 0.0102 | 16 |
 | trending_databases | static | 52.94 | 5 (-) | Summarize FAISS; Summarize Milvus; Summarize Annoy; Summarize Weaviate; Summarize Qdrant | 0 | - | 8627 / 6218 | 0.0050 | 4 |
 
+## E5: speculative execution (16 tasks of 2 s + join, 10 % of attempts straggle 10x, 1/10 time scale)
+
+| mode | runs | p50 s | p95 s | p99 s | max s | backups | backups won |
+|---|---|---|---|---|---|---|---|
+| no speculation | 40 | 2.213 | 2.221 | 3.316 | 4.015 | 0 | 0 |
+| speculation (D56) | 40 | 0.826 | 2.215 | 2.468 | 2.629 | 82 | 68 |
+
+Extra worker time with speculation, paired by seed: median +6.0 %, p95 +32.3 %. Losing attempts run to completion (no cancellation), so the cost is the backups' own run time.
+
+## Latency profile (overhead per scheduling step, all E5 runs)
+
+pickup: atsd dispatch -> worker task_started; report: worker task_completed -> atsd records it; handoff: last parent's completion -> child dispatched.
+
+| step | samples | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| pickup | 1442 | 1.0 | 2.0 | 3.0 | 6.0 |
+| report | 1360 | 1.0 | 2.0 | 3.0 | 4.0 |
+| handoff | 80 | 2.0 | 3.0 | 3.2 | 4.0 |
+

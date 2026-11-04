@@ -401,3 +401,35 @@ def test_expand_task_is_spliced_and_its_results_reach_the_dependents(redis_url, 
         assert any(e["event"] == "join_completed" and e["task"] == "t2.join" for e in log)
 
     run(body())
+
+
+# --------------------------------------------------------------------------------- Day 7 (Person B)
+
+def test_speculation_backs_up_a_straggler_and_the_backup_wins(redis_url, tmp_path):
+    """D56 with the real atsd and sim workers: t8's first attempt straggles (10x); atsd starts a
+    backup once it has run 1.5x the p90 of the other tasks; the backup commits first."""
+    from worker.faults import FaultConfig, parse_rules
+
+    async def body():
+        env = {"ATSD_SPECULATION": "1"}
+        async with Stack(redis_url, tmp_path, workers=10, atsd_env=env) as s:
+            faults = FaultConfig(rules=parse_rules("t8@1=straggler"), straggler_factor=10)
+            s.workers = [Worker(s.r, WorkerConfig(worker_id=f"w-{i}", block_ms=20, heartbeat_s=0.5,
+                                                  sim_time_scale=0.1, faults=faults)) for i in range(10)]
+            s.start_workers()
+            tasks = [{"id": f"t{i}", "type": "research", "title": f"T{i}", "instruction": "x", "depends_on": [],
+                      "hints": {"estimated_seconds": 2}} for i in range(1, 9)]
+            pf = PlanFile.model_validate({"request_id": "req_d7a", "created_at": "2026-11-03T00:00:00Z",
+                                          "plan": {"schema_version": 1, "summary": "spec", "tasks": tasks}})
+            t0 = time.monotonic()
+            await s.submit(pf)
+            assert await s.wait_status("req_d7a", timeout=20) == "SUCCEEDED"
+            elapsed = time.monotonic() - t0
+            assert elapsed < 1.5, elapsed  # the straggler alone would take 2 s
+            status = await s.r.hgetall(keys.request_key("req_d7a"))
+            assert json.loads(status["task:t8"]) == {"state": "COMPLETED", "attempt": 2}
+            committed = [e.attempt_id for e in await s.events("req_d7a") if e.event == "task_completed" and e.committed]
+            assert "req_d7a:t8:2" in committed and "req_d7a:t8:1" not in committed
+        assert "1 speculative attempts (1 won)" in s.atsd_log
+
+    run(body())

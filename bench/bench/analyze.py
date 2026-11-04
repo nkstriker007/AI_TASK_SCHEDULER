@@ -10,6 +10,7 @@
   e4_policy.png     critical-path gain over FIFO on layered-24, 100 seeds (E4, simulator)   [make bench]
   e7_requests.png   real requests: latency per mode, planner share (E7)    [if e7.csv]
   e8_expansion.png  open-ended requests: expand vs static plan (E8)        [if e8.csv]
+  e5_tail.png       straggler fan-out: makespan p50/p95/p99 with and without speculation (E5)  [if e5.csv]
 
 Chart conventions (dataviz guidance): one y-axis per chart, thin 2 px lines, at most three
 series per chart in fixed palette order (blue, orange, aqua; validated for colour-vision
@@ -300,6 +301,83 @@ def e8_expansion(rows: list[dict], out: Path) -> Path | None:
     return _save(fig, out / "e8_expansion.png")
 
 
+def _pct(values: list[float], q: float) -> float:
+    """Percentile with linear interpolation between closest ranks (numpy's default)."""
+    if not values:
+        return math.nan
+    v = sorted(values)
+    pos = q / 100 * (len(v) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (pos - lo) * (v[hi] - v[lo])
+
+
+E5_MODES = (("baseline", "no speculation"), ("speculation", "speculation (D56)"))
+E5_QS = (50, 95, 99)
+
+
+def _e5_makespans(rows: list[dict], mode: str) -> list[float]:
+    return [_num(r["makespan"]) for r in rows if r["mode"] == mode and r["status"] == "SUCCEEDED"]
+
+
+def e5_tail(rows: list[dict], out: Path) -> Path | None:
+    """Grouped bars: makespan at p50 / p95 / p99, without and with speculation."""
+    if not rows:
+        return None
+    fig, ax = plt.subplots(figsize=(5.2, 3.1))
+    width = 0.36
+    for k, (mode, label) in enumerate(E5_MODES):
+        m = _e5_makespans(rows, mode)
+        vals = [_pct(m, q) for q in E5_QS]
+        xs = [i + (k - 0.5) * width for i in range(len(E5_QS))]
+        bars = ax.bar(xs, vals, width=width * 0.92, color=SERIES[k], label=label)
+        for b, v in zip(bars, vals):
+            ax.annotate(f"{v:.2f}", (b.get_x() + b.get_width() / 2, v), xytext=(0, 2), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=8, color=INK)
+    n = len({r["seed"] for r in rows})
+    ax.set_xticks(range(len(E5_QS)), [f"p{q}" for q in E5_QS])
+    ax.set_ylabel("request makespan (s)")
+    ax.set_title(f"E5: speculative execution on a straggler fan-out, {n} paired seeds", loc="left")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    return _save(fig, out / "e5_tail.png")
+
+
+def summary_e5(rows: list[dict], latency: list[dict]) -> str:
+    if not rows:
+        return ""
+    out = ["## E5: speculative execution (16 tasks of 2 s + join, 10 % of attempts straggle 10x, 1/10 time scale)", ""]
+    table = []
+    for mode, label in E5_MODES:
+        m = _e5_makespans(rows, mode)
+        runs = [r for r in rows if r["mode"] == mode]
+        table.append([label, len(m), *[f"{_pct(m, q):.3f}" for q in E5_QS], f"{max(m):.3f}" if m else "-",
+                      sum(int(r["backups"]) for r in runs), sum(int(r["backups_won"]) for r in runs)])
+    out += [_table(["mode", "runs", "p50 s", "p95 s", "p99 s", "max s", "backups", "backups won"], table), ""]
+    # Extra worker time, paired by seed: (useful + wasted) with speculation / without, - 1.
+    by_seed: dict[str, dict[str, float]] = defaultdict(dict)
+    for r in rows:
+        by_seed[r["seed"]][r["mode"]] = _num(r["useful_ms"]) + _num(r["wasted_ms"])
+    extra = [100 * (v["speculation"] / v["baseline"] - 1) for v in by_seed.values()
+             if "speculation" in v and "baseline" in v and v["baseline"] > 0]
+    if extra:
+        out += [f"Extra worker time with speculation, paired by seed: median {_pct(extra, 50):+.1f} %, "
+                f"p95 {_pct(extra, 95):+.1f} %. Losing attempts run to completion (no cancellation), "
+                "so the cost is the backups' own run time.", ""]
+    if latency:
+        out += ["## Latency profile (overhead per scheduling step, all E5 runs)", "",
+                "pickup: atsd dispatch -> worker task_started; report: worker task_completed -> atsd records it; "
+                "handoff: last parent's completion -> child dispatched.", ""]
+        prof = []
+        for metric in ("pickup", "report", "handoff"):
+            v = [_num(r["ms"]) for r in latency if r["metric"] == metric]
+            if v:
+                prof.append([metric, len(v), *[f"{_pct(v, q):.1f}" for q in (50, 95, 99)], f"{max(v):.1f}"])
+        out += [_table(["step", "samples", "p50 ms", "p95 ms", "p99 ms", "max ms"], prof), ""]
+    return "\n".join(out)
+
+
 def summary_live(e4: list[dict], e7: list[dict], e8: list[dict]) -> str:
     out: list[str] = []
     if e4:
@@ -382,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     _style()
     sim, dist = _read(a.results / "sim.csv"), _read(a.results / "dist.csv")
     e4, e7, e8 = _read(a.results / "e4.csv"), _read(a.results / "e7.csv"), _read(a.results / "e8.csv")
+    e5, e5_latency = _read(a.results / "e5.csv"), _read(a.results / "e5_latency.csv")
     if not sim and not dist:
         raise SystemExit(f"no results in {a.results}: run `python -m bench.sim` (and `python -m bench.run`) first")
     written = []
@@ -393,10 +472,11 @@ def main(argv: list[str] | None = None) -> int:
     e3_path, be = e3_efficiency(dist, a.results)
     if e3_path:
         written.append(e3_path)
-    for fn, rows in ((e4_policy, e4), (e7_requests, e7), (e8_expansion, e8)):
+    for fn, rows in ((e4_policy, e4), (e5_tail, e5), (e7_requests, e7), (e8_expansion, e8)):
         if (p_ := fn(rows, a.results)):
             written.append(p_)
-    (a.results / "summary.md").write_text(summary(sim, dist, be) + "\n" + summary_live(e4, e7, e8) + "\n")
+    (a.results / "summary.md").write_text(summary(sim, dist, be) + "\n" + summary_live(e4, e7, e8) + "\n"
+                                          + summary_e5(e5, e5_latency) + "\n")
     for w in written + [a.results / "summary.md"]:
         print(f"wrote {w}")
     return 0

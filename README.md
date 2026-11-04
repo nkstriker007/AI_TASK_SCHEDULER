@@ -182,7 +182,7 @@ docs/contract.md                 contract #1: plan file format, issue codes, par
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
 docs/REPORT.md                   architecture, decisions, results (E1–E8), limitations
 docs/DEMO.md                     demo / video script
-docs/DECISIONS.md                decisions made during the build (D15, D17–D55)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D56)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -234,6 +234,7 @@ bench/                           benchmarks, design doc 11 (Person A, Day 6)
   bench/sim.py                   ats_sim sweep: workloads x workers x policies -> results/sim.csv
   bench/run.py                   E1-E3 with the real atsd + Redis + sim workers -> results/dist.csv
   bench/sim.py also runs E4      critical path vs FIFO on 100 random layered DAGs -> results/e4.csv
+  bench/e5.py                    E5: speculation on a straggler fan-out, paired seeds; p50/p95/p99 latency profile
   bench/e7.py                    E7: real requests, distributed vs sequential agent vs one large call (Groq)
   bench/e8.py                    E8: open-ended requests, runtime expansion vs a static plan (Groq)
   bench/live.py                  shared by E7/E8: counting planner, stack API client, atsd event log, cost
@@ -369,7 +370,7 @@ ATSD_CAPABILITY=sim ATSD_SIM_MAX_INFLIGHT=2 ATSD_POLICY=fifo ./scheduler/build/a
 
 Open items:
 
-- [ ] Person B: review the atsd changes made from Person A's side: D39 (capability pause on `retry_after_ms`) and D45 (doubling LLM backoff)
+- [ ] Person B: review the atsd changes made from Person A's side: D39 (capability pause on `retry_after_ms`) and D45 (doubling LLM backoff); notes in "Day 7 status: Person B"
 
 ## Day 6 status: Person A
 
@@ -395,7 +396,7 @@ First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
 - [x] Graph growth in the core: `Dag::expand`, `ExecutionState::onExpanded`, `Scheduler::onExpanded`, `SchedulingPolicy::reprioritize`
 - [x] `ats_sim` splices `hints.sim_subplan` (`expand_canned`: 8 tasks, makespan 60 s on unlimited workers along t2 -> t2.2 -> t2.join -> t3 -> t4); benchmark workloads unchanged (all 60 rows of `bench/results/sim.csv` reproduce exactly)
 - [x] 26 new tests: 7 graph and subplan, 3 scheduler, 11 atsd with the fake bus (splice and inputs, duplicate and late results, invalid subplans, missing result, both limits, failed subtask, priorities, restart, janitor), 4 simulator, 1 end to end with the real atsd and sim workers
-- [ ] Stretch: speculative execution; E4–E6 overhead profiling
+- [x] Stretch: speculative execution and overhead profiling (Day 7, see "Day 7 status: Person B")
 
 ```bash
 ./scheduler/build/ats_sim examples/plans/expand_canned.json --workers 0     # splice in the simulator
@@ -410,6 +411,19 @@ First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
   - "Find the largest cloud providers, research each, and write a comparison report": 5 providers spliced; SUCCEEDED in 109 s through Groq 429 retries (one task on attempt 5)
   - "Identify the currently trending databases and summarize each in a short report": 5 databases spliced; SUCCEEDED in 42 s
   - Each returned one final report. The first gate run found a planner placeholder ("Research each AI chip company" next to the compare task) that ran the research twice and left two final tasks; fixed by D54 (`EXPAND_FANOUT` + one repair). Live planner eval after the fix: 8/8 (one case used the repair)
+
+## Day 7 status: Person B
+
+- [x] Speculative execution in atsd (D56, design doc 8.8), `ATSD_SPECULATION=1`: one backup for a RUNNING attempt past 1.5x the p90 of its task type, only with spare capacity after normal dispatch; first committed result wins; a failed or lost primary hands over to the backup without a retry; backups outside the retry budget; attempt ids unique across restarts
+- [x] E5 (`bench/e5.py`, `make bench-e5`): straggler fan-out on the real atsd, Redis and sim workers, 40 paired seeds. Median makespan 2.21 s -> 0.83 s (-63 %), p99 3.32 s -> 2.47 s (-26 %), p95 unchanged (2.22 s: a backup straggles too, one backup per task), median +6 % worker time; `bench/results/e5_tail.png`
+- [x] Latency profile (overhead profiling) from atsd's event log and the workers' events: dispatch -> worker start p50 1 ms / p99 3 ms, worker completion -> atsd p50 1 ms / p99 3 ms, parent done -> child dispatched p50 2 ms / p99 3.2 ms (`summary.md`, `REPORT.md` E5)
+- [x] 12 fake-clock unit tests (backup and first-result-wins, primary still wins, off by default, sample minimum, spare capacity only, primary failed / lost -> takeover, failed backup, retry budget and unique ids, permanent failure, drain, janitor), 1 end-to-end test (a forced straggler is backed up and the backup commits), 4 bench tests
+- [ ] Review D39 and D45. Notes: both look correct as implemented; possible change, not made: cap `retry_after_ms` (e.g. at 60 s) so one bad hint cannot pause a whole capability for long
+
+```bash
+make bench-e5                                # E5 + latency profile (~3.5 min); REPEATS=10 for a quick run
+ATSD_SPECULATION=1 ./scheduler/build/atsd    # speculation on (env as in tools/atsd.cpp)
+```
 
 ## Day 7 status: Person A
 

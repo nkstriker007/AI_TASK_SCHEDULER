@@ -17,6 +17,8 @@
 //   ATSD_RUNS_DIR           event log: <dir>/<run_id>/events.jsonl; empty disables   default runs
 //   ATSD_CONSUMER           consumer name in the group      default atsd  (keep it stable: D44)
 //   ATSD_DRAIN_MS           on SIGTERM, how long to wait for attempts in flight   default 30000
+//   ATSD_SPECULATION        1 = speculative execution (D56)                       default 0
+//   ATSD_SPECULATION_FACTOR backup when running > factor x p90 of its task type   default 1.5
 //   ATSD_JANITOR_INTERVAL_MS  how often to acknowledge dead pending task entries (D49; 0 = off)   default 30000
 //   ATSD_JANITOR_MIN_IDLE_MS  only entries pending at least this long             default 60000
 //
@@ -97,6 +99,18 @@ int main(int argc, char** argv) {
       throw std::invalid_argument("ATSD_CAPABILITY must be llm or sim (got '" + cfg.defaultCapability + "')");
     const std::int64_t drainMs = envInt("ATSD_DRAIN_MS", 30'000);
     cfg.janitorIntervalMs = envInt("ATSD_JANITOR_INTERVAL_MS", 30'000);
+    cfg.speculation = envInt("ATSD_SPECULATION", 0) != 0;
+    if (const std::string f = env("ATSD_SPECULATION_FACTOR", ""); !f.empty()) {
+      std::size_t used = 0;
+      double v = 0;
+      try {
+        v = std::stod(f, &used);
+      } catch (const std::exception&) {
+        used = 0;
+      }
+      if (used != f.size() || v < 1.0) throw std::invalid_argument("ATSD_SPECULATION_FACTOR must be a number >= 1 (got '" + f + "')");
+      cfg.speculationFactor = v;
+    }
     cfg.janitorMinIdleMs = envInt("ATSD_JANITOR_MIN_IDLE_MS", 60'000);
 
     const std::string url = env("REDIS_URL", "redis://127.0.0.1:6379/0");
@@ -122,7 +136,7 @@ int main(int argc, char** argv) {
                 << service.stats().restoredTasks << " tasks already completed)\n";
 
     std::cerr << "atsd: up | redis " << url << " | capability " << cfg.defaultCapability << " | policy "
-              << cfg.policy << " | max attempts " << cfg.maxAttempts << " | llm cap "
+              << cfg.policy << (cfg.speculation ? " | speculation on" : "") << " | max attempts " << cfg.maxAttempts << " | llm cap "
               << cfg.capabilities["llm"].maxInFlight << " | events " << (logPath.empty() ? "off" : logPath) << "\n";
 
     while (g_signals == 0) service.pollOnce(200);  // short block so a stop signal is noticed quickly
@@ -143,7 +157,8 @@ int main(int argc, char** argv) {
               << " failed, " << s.rejected << " rejected, " << service.activeRequests() << " unfinished) | "
               << s.dispatched << " dispatches, " << s.retries << " retries, " << s.lostAttempts << " lost attempts, "
               << s.duplicateCompletions << " duplicate completions, " << s.expansions << " expansions ("
-              << s.splicedTasks << " tasks spliced, " << s.rejectedExpansions << " rejected), " << s.janitorAcked
+              << s.splicedTasks << " tasks spliced, " << s.rejectedExpansions << " rejected), "
+              << s.speculativeAttempts << " speculative attempts (" << s.speculativeWins << " won), " << s.janitorAcked
               << " dead pending entries acknowledged\n";
     return 0;
   } catch (const std::exception& e) {

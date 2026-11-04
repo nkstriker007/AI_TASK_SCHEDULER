@@ -129,3 +129,72 @@ def test_live_charts_and_tables_from_rows(tmp_path):
     assert analyze.e8_expansion(e8_rows, tmp_path).exists()
     text = analyze.summary_live([], e7_rows, e8_rows)
     assert "| two_companies | single | 6 |" in text and "| top_chip_companies | expand | 40 | 5 (5) |" in text
+
+
+# --------------------------------------------------------------------------------- E5 (Person B)
+
+from bench import e5  # noqa: E402
+
+
+def test_e5_plan_is_a_valid_fanout_with_a_join():
+    doc = e5.plan_doc("req_e5_t", tasks=4, seconds=1.0)
+    assert validate_plan_file(doc).ok
+    tasks = doc["plan"]["tasks"]
+    assert len(tasks) == 5 and tasks[-1]["depends_on"] == ["t1", "t2", "t3", "t4"]
+
+
+def test_e5_percentile_interpolates_like_numpy():
+    assert e5.percentile([1, 2, 3, 4], 50) == 2.5
+    assert e5.percentile([10], 99) == 10
+    assert e5.percentile(list(range(101)), 99) == 99
+
+
+def test_e5_analyse_counts_backups_waste_and_latency_steps():
+    doc = e5.plan_doc("req_x", tasks=2, seconds=1.0)  # t1, t2 -> t3
+    log = [
+        {"ts_ms": 1000, "event": "dispatched", "request": "req_x", "task": "t1", "attempt": 1},
+        {"ts_ms": 1000, "event": "dispatched", "request": "req_x", "task": "t2", "attempt": 1},
+        {"ts_ms": 1300, "event": "completed", "request": "req_x", "task": "t1", "attempt": 1},
+        {"ts_ms": 1400, "event": "speculated", "request": "req_x", "task": "t2", "attempt": 2},
+        {"ts_ms": 1650, "event": "speculation_won", "request": "req_x", "task": "t2", "attempt": 2},
+        {"ts_ms": 1650, "event": "completed", "request": "req_x", "task": "t2", "attempt": 2},
+        {"ts_ms": 1652, "event": "dispatched", "request": "req_x", "task": "t3", "attempt": 1},
+        {"ts_ms": 1900, "event": "completed", "request": "req_x", "task": "t3", "attempt": 1},
+    ]
+    worker = [
+        {"event": "task_started", "attempt_id": "req_x:t1:1", "ts_ms": 1002},
+        {"event": "task_started", "attempt_id": "req_x:t2:1", "ts_ms": 1003},
+        {"event": "task_completed", "attempt_id": "req_x:t1:1", "ts_ms": 1298, "committed": True, "exec_ms": 296},
+        {"event": "task_started", "attempt_id": "req_x:t2:2", "ts_ms": 1404},
+        {"event": "task_completed", "attempt_id": "req_x:t2:2", "ts_ms": 1648, "committed": True, "exec_ms": 244},
+        {"event": "task_started", "attempt_id": "req_x:t3:1", "ts_ms": 1655},
+        {"event": "task_completed", "attempt_id": "req_x:t3:1", "ts_ms": 1899, "committed": True, "exec_ms": 244},
+        {"event": "task_completed", "attempt_id": "req_x:t2:1", "ts_ms": 3000, "committed": False, "exec_ms": 1997},
+    ]
+    out = e5.analyse(doc, log, worker, True, 7, "SUCCEEDED", e5.FaultConfig())
+    row = out["row"]
+    assert row["mode"] == "speculation" and row["makespan"] == 0.9
+    assert (row["backups"], row["backups_won"]) == (1, 1)
+    assert (row["useful_ms"], row["wasted_ms"]) == (784, 1997)
+    by = {}
+    for s in out["samples"]:
+        by.setdefault(s["metric"], []).append(s["ms"])
+    assert sorted(by["pickup"]) == [2, 3, 3, 4]       # four dispatched attempts all started
+    assert sorted(by["report"]) == [1, 2, 2]          # worker completion -> atsd records it
+    assert by["handoff"] == [4]                        # t2's winning completion (1648) -> t3 dispatched (1652)
+
+
+def test_e5_summary_reports_percentiles_and_paired_extra_work(tmp_path):
+    rows = []
+    for seed in range(1, 11):
+        rows.append({"mode": "baseline", "seed": str(seed), "status": "SUCCEEDED", "makespan": str(2.2 if seed % 2 else 0.4),
+                     "backups": "0", "backups_won": "0", "useful_ms": "7000", "wasted_ms": "0", "stragglers": "1"})
+        rows.append({"mode": "speculation", "seed": str(seed), "status": "SUCCEEDED", "makespan": "0.8",
+                     "backups": "1", "backups_won": "1", "useful_ms": "3400", "wasted_ms": "4000", "stragglers": "1"})
+    latency = [{"mode": "baseline", "seed": "1", "metric": "pickup", "ms": str(v)} for v in (1, 2, 3, 40)]
+    text = analyze.summary_e5(rows, latency)
+    assert "## E5" in text and "| no speculation | 10 | 1.300 | 2.200 | 2.200 | 2.200 | 0 | 0 |" in text
+    assert "| speculation (D56) | 10 | 0.800 |" in text
+    assert "median +5.7 %" in text              # (3400 + 4000) / 7000 - 1
+    assert "| pickup | 4 | 2.5 |" in text
+    assert analyze.e5_tail(rows, tmp_path).exists()

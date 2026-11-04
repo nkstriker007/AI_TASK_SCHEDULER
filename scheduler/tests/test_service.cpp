@@ -1012,3 +1012,181 @@ TEST(ServiceExpand, TheJanitorKnowsSplicedTasks) {
   f.completed("req_test", "t2.1", 1);
   EXPECT_EQ(f.svc.runJanitor(), 1u);
 }
+
+// ------------------------------------------------------------------------------------------
+// Day 7: speculative execution (D56, design doc 8.8)
+
+namespace {
+
+ats::ServiceConfig specConfig(std::size_t simCap = 0, std::size_t minSamples = 3) {
+  ats::ServiceConfig c = simConfig(simCap);
+  c.speculation = true;
+  c.speculationFactor = 1.5;
+  c.speculationQuantile = 0.9;
+  c.speculationMinSamples = minSamples;
+  c.janitorIntervalMs = 0;
+  return c;
+}
+
+void completedIn(Fixture& f, const std::string& rid, const std::string& tid, int attempt, std::int64_t execMs,
+                 bool committed = true) {
+  f.event({{"event", "task_completed"}, {"attempt_id", rid + ":" + tid + ":" + std::to_string(attempt)},
+           {"worker_id", "w1"}, {"ts_ms", f.now}, {"result_key", "result:" + rid + ":" + tid},
+           {"committed", committed}, {"result_kind", "output"}, {"exec_ms", execMs}});
+}
+
+json fourTasks() { return planFile({task("t1"), task("t2"), task("t3"), task("t4")}); }
+
+// t1..t3 take 1 s; t4 is the straggler. Threshold = 1.5 x p90(1000, 1000, 1000) = 1500 ms.
+void runUntilStraggler(Fixture& f) {
+  f.submit(fourTasks());
+  for (const char* t : {"t1", "t2", "t3", "t4"}) f.started("req_test", t, 1);
+  f.now += 1'000;
+  for (const char* t : {"t1", "t2", "t3"}) completedIn(f, "req_test", t, 1, 1'000);
+}
+
+}  // namespace
+
+TEST(ServiceSpeculation, AStragglerGetsOneBackupAndTheFirstResultWins) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(400);  // t4 has run 1400 ms
+  EXPECT_EQ(f.dispatched().size(), 4u);
+  f.advance(200);  // 1600 ms > 1500 ms
+  ASSERT_EQ(f.dispatched().size(), 5u);
+  EXPECT_EQ(f.dispatched().back(), "req_test:t4:2");
+  EXPECT_EQ(f.svc.inFlight("sim"), 2u);  // primary and backup
+  EXPECT_EQ(json::parse(f.bus.hashes["request:req_test"]["task:t4"])["attempt"], 2);  // highest, for a restart
+  f.advance(5'000);
+  EXPECT_EQ(f.dispatched().size(), 5u);  // never a second backup
+
+  completedIn(f, "req_test", "t4", 2, 900);  // the backup finishes first
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+  EXPECT_EQ(f.svc.stats().speculativeAttempts, 1u);
+  EXPECT_EQ(f.svc.stats().speculativeWins, 1u);
+  EXPECT_EQ(f.svc.inFlight("sim"), 0u);
+}
+
+TEST(ServiceSpeculation, ThePrimaryCanStillWinAndTheBackupsResultIsADuplicate) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);
+  ASSERT_EQ(f.dispatched().back(), "req_test:t4:2");
+  completedIn(f, "req_test", "t4", 1, 1'700);
+  EXPECT_EQ(f.svc.stats().speculativeWins, 0u);
+  EXPECT_EQ(f.svc.inFlight("sim"), 0u);
+  completedIn(f, "req_test", "t4", 2, 900, /*committed=*/false);  // after the request finished
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+}
+
+TEST(ServiceSpeculation, OffByDefault) {
+  ats::ServiceConfig c = simConfig();
+  EXPECT_FALSE(c.speculation);
+  Fixture f(c);
+  runUntilStraggler(f);
+  f.advance(9'000);
+  EXPECT_EQ(f.dispatched().size(), 4u);
+}
+
+TEST(ServiceSpeculation, NeedsEnoughSamples) {
+  Fixture f(specConfig(0, /*minSamples=*/4));
+  runUntilStraggler(f);  // only 3 durations
+  f.advance(5'000);
+  EXPECT_EQ(f.dispatched().size(), 4u);
+}
+
+TEST(ServiceSpeculation, BackupsOnlyUseCapacityThatReadyTasksDoNotNeed) {
+  Fixture f(specConfig(/*simCap=*/2, /*minSamples=*/1));
+  f.submit(planFile({task("t1"), task("t2"), task("t3")}));
+  f.started("req_test", "t1", 1);
+  f.started("req_test", "t2", 1);
+  f.now += 100;
+  completedIn(f, "req_test", "t1", 1, 100);  // threshold 150 ms; t3 takes the freed slot
+  ASSERT_EQ(f.dispatched().back(), "req_test:t3:1");
+  f.started("req_test", "t3", 1);
+  f.advance(1'000);                          // t2 and t3 both run long, but both slots are taken
+  EXPECT_EQ(f.dispatched().size(), 3u);
+  completedIn(f, "req_test", "t3", 1, 100);  // a slot frees: now t2 gets its backup
+  EXPECT_EQ(f.dispatched().back(), "req_test:t2:2");
+}
+
+TEST(ServiceSpeculation, IfThePrimaryFailsTheBackupTakesOverWithoutARetry) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);
+  f.failed("req_test", "t4", 1, "retryable");
+  EXPECT_EQ(f.svc.stats().retries, 0u);
+  EXPECT_EQ(f.svc.stats().backupTakeovers, 1u);
+  EXPECT_EQ(f.svc.inFlight("sim"), 1u);
+  EXPECT_NE(f.bus.taskState("req_test", "t4"), "RETRYING");
+  completedIn(f, "req_test", "t4", 2, 900);
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+}
+
+TEST(ServiceSpeculation, IfThePrimaryIsLostTheBackupTakesOver) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);       // backup dispatched at +1.6 s; primary deadline is +10 s from dispatch
+  f.advance(8'400);     // the primary's deadline passes, the backup's (+11.6 s) not yet
+  EXPECT_EQ(f.svc.stats().lostAttempts, 1u);
+  EXPECT_EQ(f.svc.stats().backupTakeovers, 1u);
+  EXPECT_EQ(f.svc.stats().retries, 0u);
+  EXPECT_EQ(f.dispatched().size(), 5u);
+  completedIn(f, "req_test", "t4", 2, 900);
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+}
+
+TEST(ServiceSpeculation, AFailedBackupLeavesThePrimaryRunning) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);
+  f.failed("req_test", "t4", 2, "retryable");
+  EXPECT_EQ(f.svc.stats().retries, 0u);
+  EXPECT_EQ(f.svc.inFlight("sim"), 1u);
+  completedIn(f, "req_test", "t4", 1, 2'000);
+  EXPECT_EQ(f.bus.hashes["request:req_test"]["status"], "SUCCEEDED");
+}
+
+TEST(ServiceSpeculation, BackupsDoNotUseTheRetryBudgetAndAttemptIdsStayUnique) {
+  ats::ServiceConfig c = specConfig();
+  c.maxAttempts = 2;
+  Fixture f(c);
+  runUntilStraggler(f);
+  f.advance(600);                                // backup = attempt 2
+  f.failed("req_test", "t4", 1, "retryable");    // backup takes over
+  f.failed("req_test", "t4", 2, "retryable");    // first real failure: retry 1 of 2 left
+  EXPECT_EQ(f.svc.stats().retries, 1u);
+  f.advance(1'000);                              // sim backoff 1 s
+  EXPECT_EQ(f.dispatched().back(), "req_test:t4:3");  // not 2 again
+  f.started("req_test", "t4", 3);
+  f.failed("req_test", "t4", 3, "retryable");    // second failure: budget of 2 spent
+  EXPECT_EQ(f.bus.taskState("req_test", "t4"), "FAILED");
+}
+
+TEST(ServiceSpeculation, ThePermanentFailureOfEitherAttemptFailsTheTask) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);
+  f.failed("req_test", "t4", 2, "permanent");
+  EXPECT_EQ(f.bus.taskState("req_test", "t4"), "FAILED");
+  EXPECT_EQ(f.svc.inFlight("sim"), 0u);
+}
+
+TEST(ServiceSpeculation, NoBackupsWhileDraining) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.svc.beginDrain();
+  f.advance(5'000);
+  EXPECT_EQ(f.dispatched().size(), 4u);
+}
+
+TEST(ServiceSpeculation, TheJanitorLeavesTheLiveBackupAlone) {
+  Fixture f(specConfig());
+  runUntilStraggler(f);
+  f.advance(600);  // backup = message 5
+  leavePending(f.bus, 4);
+  leavePending(f.bus, 5);
+  EXPECT_EQ(f.svc.runJanitor(), 0u);  // both attempts of t4 are live
+  completedIn(f, "req_test", "t4", 2, 900);
+  EXPECT_EQ(f.svc.runJanitor(), 2u);
+}

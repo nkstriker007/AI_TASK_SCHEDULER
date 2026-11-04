@@ -28,6 +28,16 @@ struct Service::NodeRun {
   std::int64_t deadlineMs = 0;
   std::optional<std::int64_t> retryAtMs;  // set while waiting out a backoff
   bool completeOnDispatch = false;       // a late result arrived while RETRYING (see handleEvent)
+  // Speculative execution (D56). `attempt` stays the primary; a backup is a second live attempt
+  // with its own slot and deadline. Attempt numbers stay unique: a backup takes highest + 1, and
+  // later primaries are shifted by `extraAttempts`, which also keeps backups out of the retry budget.
+  std::int64_t startedAtMs = 0;          // when the primary reported task_started (0 = not yet)
+  int highest = 0;                       // highest attempt number dispatched for this task
+  int extraAttempts = 0;                 // backups dispatched so far
+  int backupAttempt = 0;
+  bool backupInFlight = false;
+  std::int64_t backupDeadlineMs = 0;
+  bool speculated = false;               // at most one backup per primary attempt
 };
 
 struct Service::RequestRun {
@@ -264,6 +274,7 @@ bool Service::restoreNode(RequestRun& req, NodeId n) {
     }
   }
   nr.attempt = nr.attemptBase;
+  nr.highest = nr.attemptBase;
   if (!bus_.exists(keys::resultKey(rid, req.dag.id(n)))) return false;
   nr.completeOnDispatch = true;
   return true;
@@ -307,7 +318,7 @@ void Service::handleEvent(std::string_view text) {
   }
   RequestRun& req = *it->second;
   auto node = req.dag.find(tid);
-  if (!node || attempt > req.nodes[*node].attempt) {
+  if (!node || attempt > req.nodes[*node].highest) {
     ++stats_.ignoredEvents;
     diag("event for an unknown task or attempt: " + attemptId);
     return;
@@ -319,6 +330,7 @@ void Service::handleEvent(std::string_view text) {
   if (kind == "task_started") {
     if (attempt == nr.attempt && nr.inFlight && st == TaskState::Queued) {
       req.sched->started(n);
+      nr.startedAtMs = now_();
       writeTask(req, n, "RUNNING");
       log("started", rid, tid, attempt, worker);
     } else {
@@ -339,13 +351,29 @@ void Service::handleEvent(std::string_view text) {
       nr.completeOnDispatch = true;
       log("late_result", rid, tid, attempt, worker, "completes on next dispatch");
     } else {  // QUEUED or RUNNING, possibly waiting out a backoff
+      const bool backupWon = nr.backupAttempt != 0 && attempt == nr.backupAttempt;
+      if (ev.contains("exec_ms") && ev["exec_ms"].is_number_integer())
+        recordDuration(std::string(toString(req.dag.task(n).type)), ev["exec_ms"].get<std::int64_t>());
       if (nr.inFlight) releaseSlot(req, n);
+      releaseBackup(req, n);  // the other attempt may still finish; its result is a duplicate (8.5)
       nr.retryAtMs.reset();
+      if (backupWon) {
+        ++stats_.speculativeWins;
+        log("speculation_won", rid, tid, attempt, worker);
+      }
       completeNode(req, n, worker, attempt);  // splices first if this is an expand task (D53)
     }
   } else if (kind == "task_failed") {
-    if (attempt == nr.attempt && nr.inFlight && (st == TaskState::Queued || st == TaskState::Running)) {
+    const bool live = st == TaskState::Queued || st == TaskState::Running;
+    if (live && nr.backupInFlight && attempt == nr.backupAttempt && ev.value("error_class", "") != "permanent") {
+      releaseBackup(req, n);  // a failed backup changes nothing: the primary is still running
+      log("backup_failed", rid, tid, attempt, worker, ev.value("message", std::string{}));
+    } else if (attempt == nr.attempt && nr.inFlight && live && ev.value("error_class", "") != "permanent" &&
+               promoteBackup(req, n)) {
+      log("backup_took_over", rid, tid, nr.attempt, worker, "primary failed: " + ev.value("message", std::string{}));
+    } else if (live && ((attempt == nr.attempt && nr.inFlight) || (attempt == nr.backupAttempt && nr.backupInFlight))) {
       releaseSlot(req, n);
+      releaseBackup(req, n);
       const std::string message = ev.value("message", std::string{});
       if (ev.value("error_class", "") == "permanent") {
         failNode(req, n, tid + " failed permanently: " + message);
@@ -381,6 +409,7 @@ void Service::tick() {
   expireDeadlines();
   startDueRetries();
   dispatchAll();
+  speculate();
   sweepFinished();
   if (config_.janitorIntervalMs > 0 && now_() >= nextJanitorMs_) {
     nextJanitorMs_ = now_() + config_.janitorIntervalMs;
@@ -422,9 +451,9 @@ bool Service::attemptResolved(const std::string& data) {
   if (!node) return true;
   const NodeRun& nr = req.nodes[*node];
   if (isTerminal(req.sched->state().state(*node))) return true;
-  if (attempt < nr.attempt) return true;                // superseded by a newer attempt
-  if (attempt == nr.attempt) return !nr.inFlight;       // lost or failed, waiting for its retry
-  return false;                                         // newer than atsd knows: leave it
+  if (attempt == nr.attempt && nr.inFlight) return false;              // the live primary
+  if (attempt == nr.backupAttempt && nr.backupInFlight) return false;  // the live backup (D56)
+  return attempt <= nr.highest;  // superseded, lost or failed; newer than atsd knows: leave it
 }
 
 std::size_t Service::runJanitor() {
@@ -474,6 +503,7 @@ std::optional<std::int64_t> Service::nextTimerMs() const {
   for (const auto& [id, req] : active_) {
     for (const auto& nr : req->nodes) {
       if (nr.inFlight && (!next || nr.deadlineMs < *next)) next = nr.deadlineMs;
+      if (nr.backupInFlight && (!next || nr.backupDeadlineMs < *next)) next = nr.backupDeadlineMs;
       if (nr.retryAtMs && (!next || *nr.retryAtMs < *next)) next = *nr.retryAtMs;
     }
   }
@@ -488,11 +518,20 @@ void Service::expireDeadlines() {
     RequestRun& req = *it->second;
     for (NodeId n = 0; n < req.nodes.size(); ++n) {
       NodeRun& nr = req.nodes[n];
+      if (nr.backupInFlight && nr.backupDeadlineMs <= now) {
+        ++stats_.lostAttempts;
+        log("attempt_lost", id, req.dag.id(n), nr.backupAttempt, "", "backup's deadline passed");
+        releaseBackup(req, n);
+      }
       if (!nr.inFlight || nr.deadlineMs > now) continue;
       // The only lost-attempt detector (D10): no XAUTOCLAIM, no heartbeat dependence.
-      releaseSlot(req, n);
       ++stats_.lostAttempts;
       log("attempt_lost", id, req.dag.id(n), nr.attempt, "", "deadline passed");
+      if (promoteBackup(req, n)) {
+        log("backup_took_over", id, req.dag.id(n), nr.attempt, "", "primary's deadline passed");
+        continue;
+      }
+      releaseSlot(req, n);
       scheduleRetry(req, n, std::nullopt, "deadline passed");
     }
     checkDone(req);
@@ -518,11 +557,12 @@ void Service::startDueRetries() {
 void Service::scheduleRetry(RequestRun& req, NodeId n, std::optional<std::int64_t> retryAfterMs, const std::string& why) {
   NodeRun& nr = req.nodes[n];
   const std::string& rid = req.dag.requestId();
-  if (nr.attempt - nr.attemptBase >= config_.maxAttempts) {  // a restart starts a fresh budget (D44)
+  const int tries = nr.attempt - nr.attemptBase - nr.extraAttempts;  // backups do not count (D56)
+  if (tries >= config_.maxAttempts) {  // a restart starts a fresh budget (D44)
     failNode(req, n, req.dag.id(n) + " failed after " + std::to_string(nr.attempt) + " attempts: " + why);
     return;
   }
-  std::int64_t delay = backoffFor(nr.capability, nr.attempt - nr.attemptBase);
+  std::int64_t delay = backoffFor(nr.capability, tries);
   if (retryAfterMs) delay = std::max(delay, *retryAfterMs);  // honour the provider's hint (8.6)
   nr.retryAtMs = now_() + delay;
   ++stats_.retries;
@@ -630,11 +670,28 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
     checkDone(req);
     return;
   }
-  nr.attempt = nr.attemptBase + d.attempt;
+  nr.attempt = std::max(nr.attemptBase + d.attempt + nr.extraAttempts, nr.highest + 1);
+  nr.highest = nr.attempt;
+  nr.startedAtMs = 0;
+  nr.speculated = false;
 
   const std::int64_t deadline = now_() + capabilityConfig(nr.capability).timeoutMs;
-  // A join has no result of its own: a dependent of t2.join receives the subplan sinks' results
-  // (design doc 8.11), keyed by their spliced ids.
+  nr.inFlight = true;
+  nr.deadlineMs = deadline;
+  ++inFlight_[nr.capability];
+  ++req.inFlight;
+  bus_.add(keys::taskStream(nr.capability), taskMessage(req, d.node, nr.attempt, deadline));
+  ++stats_.dispatched;
+  writeTask(req, d.node, "QUEUED");
+  log("dispatched", rid, t.id, nr.attempt, "", keys::taskStream(nr.capability));
+}
+
+// One TaskMessage (contract #2). A join has no result of its own: a dependent of t2.join receives
+// the subplan sinks' results (design doc 8.11), keyed by their spliced ids.
+std::string Service::taskMessage(const RequestRun& req, NodeId n, int attempt, std::int64_t deadlineMs) const {
+  const Dag& g = req.dag;
+  const std::string& rid = g.requestId();
+  const TaskSpec& t = g.task(n);
   json inputs = json::object();
   std::function<void(NodeId)> addInput = [&](NodeId p) {
     if (g.isJoin(p)) {
@@ -643,27 +700,105 @@ void Service::dispatch(RequestRun& req, const Dispatch& d) {
       inputs[g.id(p)] = keys::resultKey(rid, g.id(p));
     }
   };
-  for (NodeId p : g.parents(d.node)) addInput(p);
+  for (NodeId p : g.parents(n)) addInput(p);
   json msg = {
       {"request_id", rid},
       {"task_id", t.id},
-      {"attempt", nr.attempt},
-      {"attempt_id", rid + ":" + t.id + ":" + std::to_string(nr.attempt)},
+      {"attempt", attempt},
+      {"attempt_id", rid + ":" + t.id + ":" + std::to_string(attempt)},
       {"type", std::string(toString(t.type))},
       {"instruction", t.instruction},
       {"inputs", inputs},
-      {"deadline_ms", deadline},
+      {"deadline_ms", deadlineMs},
   };
   if (t.estimatedSeconds) msg["estimated_seconds"] = *t.estimatedSeconds;
+  return msg.dump();
+}
 
-  nr.inFlight = true;
-  nr.deadlineMs = deadline;
+// ------------------------------------------------------------------------------- speculation (D56)
+
+void Service::recordDuration(const std::string& type, std::int64_t ms) {
+  if (ms < 0) return;
+  auto& window = durations_[type];
+  window.push_back(ms);
+  constexpr std::size_t kWindow = 200;  // recent attempts only
+  if (window.size() > kWindow) window.pop_front();
+}
+
+std::optional<double> Service::durationQuantile(const std::string& type) const {
+  auto it = durations_.find(type);
+  if (it == durations_.end() || it->second.size() < std::max<std::size_t>(config_.speculationMinSamples, 1))
+    return std::nullopt;
+  std::vector<std::int64_t> v(it->second.begin(), it->second.end());
+  std::sort(v.begin(), v.end());
+  const double pos = config_.speculationQuantile * static_cast<double>(v.size() - 1);  // linear interpolation
+  const std::size_t lo = static_cast<std::size_t>(pos);
+  const std::size_t hi = std::min(lo + 1, v.size() - 1);
+  return static_cast<double>(v[lo]) + (pos - static_cast<double>(lo)) * static_cast<double>(v[hi] - v[lo]);
+}
+
+// Runs after dispatchAll, so backups only use capacity that no ready task wanted.
+void Service::speculate() {
+  if (!config_.speculation || draining_) return;
+  const std::int64_t now = now_();
+  for (const auto& id : order_) {
+    auto it = active_.find(id);
+    if (it == active_.end() || it->second->finished) continue;
+    RequestRun& req = *it->second;
+    for (NodeId n = 0; n < req.nodes.size(); ++n) {
+      NodeRun& nr = req.nodes[n];
+      if (!nr.inFlight || nr.speculated || nr.backupInFlight || nr.startedAtMs == 0) continue;
+      if (req.sched->state().state(n) != TaskState::Running || req.dag.isJoin(n)) continue;
+      const auto q = durationQuantile(std::string(toString(req.dag.task(n).type)));
+      if (!q) continue;
+      const double threshold = config_.speculationFactor * *q;
+      const std::int64_t running = now - nr.startedAtMs;
+      if (static_cast<double>(running) <= threshold || !hasRoom(nr.capability)) continue;
+      dispatchBackup(req, n, running, threshold);
+    }
+  }
+}
+
+void Service::dispatchBackup(RequestRun& req, NodeId n, std::int64_t runningMs, double thresholdMs) {
+  NodeRun& nr = req.nodes[n];
+  nr.speculated = true;
+  nr.backupAttempt = nr.highest + 1;
+  nr.highest = nr.backupAttempt;
+  ++nr.extraAttempts;
+  nr.backupInFlight = true;
+  nr.backupDeadlineMs = now_() + capabilityConfig(nr.capability).timeoutMs;
   ++inFlight_[nr.capability];
   ++req.inFlight;
-  bus_.add(keys::taskStream(nr.capability), msg.dump());
+  bus_.add(keys::taskStream(nr.capability), taskMessage(req, n, nr.backupAttempt, nr.backupDeadlineMs));
   ++stats_.dispatched;
-  writeTask(req, d.node, "QUEUED");
-  log("dispatched", rid, t.id, nr.attempt, "", keys::taskStream(nr.capability));
+  ++stats_.speculativeAttempts;
+  writeTask(req, n, "RUNNING");  // records the new highest attempt number, for a restart (D44)
+  log("speculated", req.dag.requestId(), req.dag.id(n), nr.backupAttempt, "",
+      "attempt " + std::to_string(nr.attempt) + " running " + std::to_string(runningMs) + " ms > " +
+          std::to_string(static_cast<std::int64_t>(thresholdMs)) + " ms");
+}
+
+void Service::releaseBackup(RequestRun& req, NodeId n) {
+  NodeRun& nr = req.nodes[n];
+  if (!nr.backupInFlight) return;
+  nr.backupInFlight = false;
+  auto& count = inFlight_[nr.capability];
+  if (count > 0) --count;
+  if (req.inFlight > 0) --req.inFlight;
+}
+
+// The primary failed or was lost while a backup runs: the backup becomes the primary, with its
+// slot and deadline. No retry, and the retry budget is unchanged. False if there is no backup.
+bool Service::promoteBackup(RequestRun& req, NodeId n) {
+  NodeRun& nr = req.nodes[n];
+  if (!nr.backupInFlight) return false;
+  releaseSlot(req, n);  // the primary's slot
+  nr.attempt = nr.backupAttempt;
+  nr.deadlineMs = nr.backupDeadlineMs;
+  nr.inFlight = true;   // takes over the backup's slot (already counted)
+  nr.backupInFlight = false;
+  ++stats_.backupTakeovers;
+  return true;
 }
 
 void Service::releaseSlot(RequestRun& req, NodeId n) {
@@ -804,7 +939,7 @@ void Service::sweepFinished() {
 
 void Service::writeTask(RequestRun& req, NodeId n, const std::string& state) {
   bus_.hset(keys::requestKey(req.dag.requestId()),
-            {{"task:" + req.dag.id(n), taskStateJson(state, req.nodes[n].attempt)},
+            {{"task:" + req.dag.id(n), taskStateJson(state, std::max(req.nodes[n].attempt, req.nodes[n].highest))},
              {"updated_ms", std::to_string(now_())}});
 }
 
