@@ -1,6 +1,6 @@
 BUILD ?= scheduler/build
 
-.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist bench-e5 live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
+.PHONY: build test cpp-test py-test parity demo demo-llm e2e chaos bench bench-dist bench-e5 bench-e9 live-bench up up-llm down clean redis-deps redis-spike redis-up redis-down
 
 build:
 	cmake -S scheduler -B $(BUILD) -DCMAKE_BUILD_TYPE=Debug
@@ -86,6 +86,13 @@ bench-dist: bench
 # 40 paired seeds), plus the p50/p95/p99 latency profile. make bench-e5 REPEATS=10 for a quick run.
 bench-e5: build
 	cd bench && uv run python -m bench.e5 $(if $(REPEATS),--repeats $(REPEATS),) && uv run python -m bench.analyze
+
+# E9: accuracy on public datasets (ParallelQA, HotpotQA comparison, movie recommendation), the
+# workflow on the running LLM stack (make up-llm first) vs one LLM call, same model and question.
+# Stops at BUDGET tokens (Groq free tier: 200k/day) and continues where it stopped on the next run.
+#   make bench-e9 N=10 BUDGET=150000
+bench-e9:
+	cd bench && uv run --env-file ../.env python -m bench.e9 --per-dataset $(or $(N),10) --budget-tokens $(or $(BUDGET),150000) && uv run python -m bench.analyze
 
 # E7 and E8 on real Groq calls against the running LLM stack (make up-llm first). Slow on the 8k
 # tokens/min tier: a cooldown before every mode keeps one mode's 429s out of the next (~30 min).

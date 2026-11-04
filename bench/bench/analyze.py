@@ -10,6 +10,7 @@
   e4_policy.png     critical-path gain over FIFO on layered-24, 100 seeds (E4, simulator)   [make bench]
   e7_requests.png   real requests: latency per mode, planner share (E7)    [if e7.csv]
   e8_expansion.png  open-ended requests: expand vs static plan (E8)        [if e8.csv]
+  e9_accuracy.png   public datasets: accuracy of the workflow vs one LLM call (E9)  [if e9.csv]
   e5_tail.png       straggler fan-out: makespan p50/p95/p99 with and without speculation (E5)  [if e5.csv]
 
 Chart conventions (dataviz guidance): one y-axis per chart, thin 2 px lines, at most three
@@ -378,6 +379,86 @@ def summary_e5(rows: list[dict], latency: list[dict]) -> str:
     return "\n".join(out)
 
 
+E9_DATASETS = (("parallelqa", "ParallelQA"), ("hotpotqa_comparison", "HotpotQA comparison"),
+               ("movie_recommendation", "Movie recommendation"))
+E9_MODES = (("workflow", "workflow (plan + parallel tasks)"), ("single", "single LLM call"))
+
+
+def _e9_rows(rows: list[dict], dataset: str, mode: str) -> list[dict]:
+    return [r for r in rows if r["dataset"] == dataset and r["mode"] == mode]
+
+
+def e9_accuracy(rows: list[dict], out: Path) -> Path | None:
+    """Grouped bars: accuracy per dataset, workflow vs single call, n per bar in the label."""
+    if not rows:
+        return None
+    present = [(d, label) for d, label in E9_DATASETS if any(r["dataset"] == d for r in rows)]
+    fig, ax = plt.subplots(figsize=(5.6, 3.1))
+    width = 0.36
+    for k, (mode, label) in enumerate(E9_MODES):
+        vals, ns = [], []
+        for d, _ in present:
+            rs = _e9_rows(rows, d, mode)
+            ns.append(len(rs))
+            vals.append(100 * sum(int(r["correct"]) for r in rs) / len(rs) if rs else 0.0)
+        xs = [i + (k - 0.5) * width for i in range(len(present))]
+        bars = ax.bar(xs, vals, width=width * 0.92, color=SERIES[k], label=label)
+        for b, v, n in zip(bars, vals, ns):
+            ax.annotate(f"{v:.0f}%\nn={n}", (b.get_x() + b.get_width() / 2, v), xytext=(0, 2),
+                        textcoords="offset points", ha="center", va="bottom", fontsize=7.5, color=INK)
+    ax.set_xticks(range(len(present)), [label for _, label in present])
+    ax.set_ylim(0, 118)
+    ax.set_ylabel("correct answers (%)")
+    ax.set_title("E9: accuracy on public datasets, workflow vs one LLM call", loc="left")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    return _save(fig, out / "e9_accuracy.png")
+
+
+def summary_e9(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    out = ["## E9: accuracy on public datasets, workflow vs one LLM call", "",
+           "Correct: a numeric reference within 10 %, otherwise exact match after normalising (LLMCompiler's rule); "
+           "F1: token overlap (HotpotQA). Latency includes the planner for the workflow.", ""]
+    table = []
+    for d, dlabel in E9_DATASETS:
+        for mode, mlabel in E9_MODES:
+            rs = _e9_rows(rows, d, mode)
+            if not rs:
+                continue
+            ok = [r for r in rs if r["status"] == "SUCCEEDED"]
+            lat = [_num(r["latency_s"]) for r in ok]
+            tok = [_num(r["tokens_in"]) + _num(r["tokens_out"]) for r in ok]
+            table.append([dlabel, mlabel, len(rs), f"{100 * sum(int(r['correct']) for r in rs) / len(rs):.0f}%",
+                          f"{sum(_num(r['f1']) for r in rs) / len(rs):.2f}",
+                          f"{_pct(lat, 50):.1f}" if lat else "-", f"{_pct(lat, 95):.1f}" if lat else "-",
+                          f"{_pct(tok, 50):,.0f}" if tok else "-",
+                          f"{sum(_num(r['cost_usd']) for r in rs):.4f}", len(rs) - len(ok),
+                          sum(r["extracted"] == "llm" for r in rs)])
+    out += [_table(["dataset", "mode", "questions", "correct", "mean F1", "p50 latency s", "p95 latency s",
+                    "median tokens", "cost $", "failed runs", "answer extracted by LLM"], table), ""]
+    by = []
+    for d, dlabel in E9_DATASETS:
+        branches = sorted({int(r["branch"]) for r in rows if r["dataset"] == d and str(r["branch"]).isdigit()})
+        if len(branches) < 2:
+            continue
+        for b in branches:
+            cells = [dlabel, b]
+            for mode, _ in E9_MODES:
+                rs = [r for r in _e9_rows(rows, d, mode) if str(r["branch"]) == str(b)]
+                lat = [_num(r["latency_s"]) for r in rs if r["status"] == "SUCCEEDED"]
+                cells += [f"{100 * sum(int(r['correct']) for r in rs) / len(rs):.0f}% ({len(rs)})" if rs else "-",
+                          f"{_pct(lat, 50):.1f}" if lat else "-"]
+            by.append(cells)
+    if by:
+        out += ["By number of entities (branches):", "",
+                _table(["dataset", "branches", "workflow correct (n)", "workflow p50 s", "single correct (n)",
+                        "single p50 s"], by), ""]
+    return "\n".join(out)
+
+
 def summary_live(e4: list[dict], e7: list[dict], e8: list[dict]) -> str:
     out: list[str] = []
     if e4:
@@ -461,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     sim, dist = _read(a.results / "sim.csv"), _read(a.results / "dist.csv")
     e4, e7, e8 = _read(a.results / "e4.csv"), _read(a.results / "e7.csv"), _read(a.results / "e8.csv")
     e5, e5_latency = _read(a.results / "e5.csv"), _read(a.results / "e5_latency.csv")
+    e9 = _read(a.results / "e9.csv")
     if not sim and not dist:
         raise SystemExit(f"no results in {a.results}: run `python -m bench.sim` (and `python -m bench.run`) first")
     written = []
@@ -472,11 +554,11 @@ def main(argv: list[str] | None = None) -> int:
     e3_path, be = e3_efficiency(dist, a.results)
     if e3_path:
         written.append(e3_path)
-    for fn, rows in ((e4_policy, e4), (e5_tail, e5), (e7_requests, e7), (e8_expansion, e8)):
+    for fn, rows in ((e4_policy, e4), (e5_tail, e5), (e7_requests, e7), (e8_expansion, e8), (e9_accuracy, e9)):
         if (p_ := fn(rows, a.results)):
             written.append(p_)
     (a.results / "summary.md").write_text(summary(sim, dist, be) + "\n" + summary_live(e4, e7, e8) + "\n"
-                                          + summary_e5(e5, e5_latency) + "\n")
+                                          + summary_e5(e5, e5_latency) + "\n" + summary_e9(e9) + "\n")
     for w in written + [a.results / "summary.md"]:
         print(f"wrote {w}")
     return 0

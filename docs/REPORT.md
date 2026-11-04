@@ -256,6 +256,31 @@ Reading it:
   live (see limitations).
 - One run per mode: indicative, not statistically tight.
 
+### E9: is the workflow's answer as good as one normal LLM call?
+
+E7 and E8 measure speed and cost; their only measure of the answers is length. E9 measures
+correctness, on public datasets with reference answers (`bench/datasets/`, sources and licenses in its
+README), using the questions and scoring rule of LLMCompiler (Kim et al., ICML 2024), the closest prior
+work:
+
+| dataset | questions | what it needs |
+|---|---|---|
+| ParallelQA | 113 | facts about 2–5 entities, then arithmetic ("If the Mariana Trench were 20 % shallower …") |
+| HotpotQA comparison | 200 of 1,487 | two entities, then a comparison ("Which writer was from England, …?") |
+| Movie recommendation | 100 of 500 | four movies, then one of four options |
+
+Each question runs as the **workflow** (planner → plan → atsd and the LLM workers) and as a **single
+call**, on the same model with the same answer-format instruction. Correct means a numeric reference
+matched within 10 %, otherwise an exact match after normalisation; token-F1 is reported alongside.
+Results are broken down by the number of entities, where parallel lookups should matter most
+(`bench/e9.py`, `make bench-e9`, D57).
+
+**Results: not run yet.** `make up-llm && make bench-e9` writes the table and `e9_accuracy.png` to
+`bench/results/`. On Groq's free tier about 30 questions × 2 modes fit in one day's token budget; the run
+stops at the budget and continues on the next day. LLMCompiler's agents used a search tool; here both
+modes answer from model knowledge (D15), so the scores compare this project's two modes with each other,
+not with the paper's results.
+
 ## 4. Limitations
 
 - **Rate limits dominate real latency.** Groq's on_demand tier for gpt-oss-120b allows 8,000 tokens per
@@ -293,6 +318,7 @@ make build && make test          # C++ + Python unit, parity, integration (incl.
 make bench                       # simulator sweep + E4 -> bench/results/*.png, summary.md
 make bench-dist                  # + E1–E3 with the real atsd and Redis (~1 min)
 make bench-e5                    # E5 + latency profile with the real atsd and Redis (~3.5 min)
+make bench-e9 N=10               # E9 on the running LLM stack (make up-llm), within the day's Groq budget
 make chaos                       # E6 on the Docker stack
 make up-llm                      # real Groq stack (GROQ_API_KEY in .env)
 cd bench && uv run --env-file ../.env python -m bench.e7   # E7 (~15 min, rate-limited)

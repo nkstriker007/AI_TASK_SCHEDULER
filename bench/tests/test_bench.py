@@ -198,3 +198,117 @@ def test_e5_summary_reports_percentiles_and_paired_extra_work(tmp_path):
     assert "median +5.7 %" in text              # (3400 + 4000) / 7000 - 1
     assert "| pickup | 4 | 2.5 |" in text
     assert analyze.e5_tail(rows, tmp_path).exists()
+
+
+# --------------------------------------------------------------------------------- E9
+
+from bench import e9  # noqa: E402
+
+
+def test_e9_datasets_load_with_reference_answers():
+    sizes = {name: len(e9.load(name)) for name in e9.DATASETS}
+    assert sizes == {"parallelqa": 113, "hotpotqa_comparison": 200, "movie_recommendation": 100}
+    for name in e9.DATASETS:
+        for item in e9.load(name):
+            assert item["id"] and item["question"] and item["answer"]
+    for item in e9.load("movie_recommendation"):
+        assert item["answer"] in item["options"] and len(item["options"]) == 4
+
+
+def test_e9_sample_covers_every_branch_count():
+    picked = e9.sample(e9.load("parallelqa"), 8)
+    assert sorted(int(p["branch"]) for p in picked) == [2, 2, 3, 3, 4, 4, 5, 5]
+    assert e9.sample(e9.load("parallelqa"), 8) == picked  # deterministic
+
+
+def test_e9_scoring_follows_llmcompiler():
+    assert e9.correct("about 540 million", "522")          # within 10 %
+    assert not e9.correct("600", "522")
+    assert e9.correct("1.1", "1.125") and not e9.correct("n/a", "1.125")
+    assert e9.correct("Yes.", "yes") and not e9.correct("no", "yes")
+    assert e9.correct("The Mariana Trench", "Mariana Trench")
+    assert not e9.correct("Robert Erskine Childers", "Robert Erskine Childers DSC")  # exact match only...
+    assert e9.f1("Robert Erskine Childers", "Robert Erskine Childers DSC") > 0.8  # ...F1 gives partial credit
+    opts = ["Forrest Gump", "Righteous Kill", "Rosetta", "In Cold Blood"]
+    assert e9.correct("I would pick Forrest Gump", "Forrest Gump", opts)
+    assert not e9.correct("Forrest Gump or Rosetta", "Forrest Gump", opts)  # names two options
+    assert not e9.correct(None, "yes")
+
+
+def test_e9_final_line_reads_the_last_marker():
+    assert e9.final_line("Reasoning...\n**Final answer:** Forrest Gump.") == "Forrest Gump"
+    assert e9.final_line("Final answer: 1\nmore\nFinal answer: 2") == "2"
+    assert e9.final_line("no marker here") is None
+
+
+def _fake_modes(calls):
+    async def single(request):
+        calls.append(("single", request))
+        return {"status": "SUCCEEDED", "seconds": 1.0, "planner_s": 0.0, "tasks": 0, "text": "Final answer: yes",
+                "tokens_in": 100, "tokens_out": 50, "llm_calls": 1, "retries": 0, "request_id": ""}
+
+    def workflow(request, api):
+        calls.append(("workflow", request))
+        return {"status": "SUCCEEDED", "seconds": 3.0, "planner_s": 1.0, "tasks": 3, "text": "Final answer: no",
+                "tokens_in": 1000, "tokens_out": 500, "llm_calls": 4, "retries": 1, "request_id": "req_x"}
+
+    async def extract(text, question):
+        return e9.final_line(text), "line", (0, 0, 0)
+
+    return single, workflow, extract
+
+
+def _yes_no_dataset(tmp_path, n):
+    d = tmp_path / "datasets"
+    d.mkdir()
+    with (d / "hotpotqa_comparison.jsonl").open("w") as f:
+        for i in range(n):
+            f.write(json.dumps({"id": f"q{i}", "question": f"Is {i} even?", "answer": "yes", "branch": 2}) + "\n")
+    return d
+
+
+def test_e9_loop_scores_both_modes_alternates_order_and_resumes(tmp_path):
+    d, out, calls = _yes_no_dataset(tmp_path, 3), tmp_path / "e9.csv", []
+    single, workflow, extract = _fake_modes(calls)
+    rows = e9.run(["hotpotqa_comparison"], 3, out, "http://x", 10**9, 0, single=single, workflow=workflow,
+                  extract=extract, datasets_dir=d)
+    assert len(rows) == 6
+    by = {(r["id"], r["mode"]): r for r in rows}
+    assert by[("q0", "single")]["correct"] == 1 and by[("q0", "workflow")]["correct"] == 0
+    assert by[("q0", "workflow")]["tokens_in"] == 1000 and by[("q0", "workflow")]["planner_s"] == 1.0
+    assert [m for m, _ in calls] == ["workflow", "single", "single", "workflow", "workflow", "single"]
+    assert all(e9.ANSWER_FORMAT in req for _, req in calls)  # same instruction for both modes
+    with out.open() as f:
+        assert len(list(csv.DictReader(f))) == 6
+
+    calls.clear()  # a rerun skips everything that already succeeded
+    rows = e9.run(["hotpotqa_comparison"], 3, out, "http://x", 10**9, 0, single=single, workflow=workflow,
+                  extract=extract, datasets_dir=d)
+    assert calls == [] and len(rows) == 6
+
+
+def test_e9_loop_stops_at_the_token_budget_and_continues_later(tmp_path):
+    d, out, calls = _yes_no_dataset(tmp_path, 4), tmp_path / "e9.csv", []
+    single, workflow, extract = _fake_modes(calls)
+    rows = e9.run(["hotpotqa_comparison"], 4, out, "http://x", 1500, 0, single=single, workflow=workflow,
+                  extract=extract, datasets_dir=d)
+    assert len(rows) == 2  # one question (1,650 tokens) reaches the 1,500 budget
+    rows = e9.run(["hotpotqa_comparison"], 4, out, "http://x", 10**9, 0, single=single, workflow=workflow,
+                  extract=extract, datasets_dir=d)
+    assert len(rows) == 8
+
+
+def test_e9_summary_and_chart(tmp_path):
+    rows = []
+    for i in range(4):
+        for mode, ok in (("workflow", i % 2), ("single", 1)):
+            rows.append({"dataset": "parallelqa", "id": f"p{i}", "branch": str(2 + i % 2), "mode": mode,
+                         "status": "SUCCEEDED", "correct": str(ok), "f1": "1.0" if ok else "0.0", "latency_s": "3.0",
+                         "planner_s": "1.0", "tasks": "3", "llm_calls": "4", "tokens_in": "900", "tokens_out": "100",
+                         "cost_usd": "0.0002", "retries": "0", "extracted": "line", "prediction": "x", "gold": "y",
+                         "request_id": "", "error": ""})
+    text = analyze.summary_e9(rows)
+    assert "| ParallelQA | workflow (plan + parallel tasks) | 4 | 50% |" in text
+    assert "| ParallelQA | single LLM call | 4 | 100% |" in text
+    assert "By number of entities" in text and "| ParallelQA | 3 | 100% (2) |" in text
+    assert analyze.e9_accuracy(rows, tmp_path).exists()

@@ -137,6 +137,7 @@ table for every experiment); `docs/REPORT.md` interprets them.
 | `make bench-e5` | **E5** (speculative execution on a straggler fan-out, 40 paired seeds: p50 / p95 / p99 makespan, extra worker time) and the **latency profile** (p50 / p95 / p99 per scheduling step); `REPEATS=10` for a quick run | ~3.5 min | free |
 | `make chaos` | **E6** (fault tolerance: completion, retries, lost attempts, duplicate commits) | a few minutes | free, Docker |
 | `make up-llm && make live-bench` | **E7** (real requests: distributed vs a sequential agent vs one large call) and **E8** (runtime expansion vs a static plan) | ~30 min | Groq free tier (rate-limited; 200k tokens/day) |
+| `make up-llm && make bench-e9 N=10` | **E9** (answer accuracy on public datasets with reference answers: the workflow vs one normal LLM call, same model and question; by number of entities); stops at `BUDGET` tokens and continues on the next run | ~30–60 min for N=10 | Groq free tier (~1 day's budget for 30 questions × 2 modes) |
 
 Sim tasks are timed sleeps, so E1–E6 are free and repeatable and isolate the runtime's own cost; E7 and E8
 use real LLM calls. Rerun `make bench` after the others to regenerate every plot and `summary.md`.
@@ -154,6 +155,7 @@ use real LLM calls. Rerun `make bench` after the others to regenerate every plot
 | fault tolerance (E6) | 6 requests, 3 workers killed, 20 retries, 4 lost attempts recovered: all succeeded, 0 duplicate commits; on real Groq a killed worker's task was retried and the request succeeded | Docker stack; real Groq |
 | real requests (E7) | parallel beat a sequential agent by 23 % when the rate limit allowed 2 calls at once (10.5 s vs 13.6 s); one large call was fastest (4–7 s); the planner is 31–52 % of latency on light requests | Groq free tier, 1 run per mode |
 | expansion (E8) | splicing takes 1 ms and adds no planner calls; with no item count given, expansion found 10 items against a static plan's guessed 5 | Groq free tier |
+| accuracy vs one LLM call (E9) | not run yet: `make bench-e9` writes it to `summary.md` | public datasets, Groq |
 
 E7 and E8 are single runs on a rate-limited free tier: indicative, not statistically tight.
 
@@ -238,7 +240,7 @@ docs/contract.md                 contract #1: plan file format, issue codes, par
 docs/messages.md                 contract #2 (frozen): task messages, events and result values; request intake/status (proposed)
 docs/REPORT.md                   architecture, decisions, results (E1–E8), limitations
 docs/DEMO.md                     demo / video script
-docs/DECISIONS.md                decisions made during the build (D15, D17–D56)
+docs/DECISIONS.md                decisions made during the build (D15, D17–D57)
 schemas/                         JSON Schema generated from planner/planner/schema.py and messages.py (do not edit by hand)
 examples/plans/                  shared fixtures (plan files with the envelope)
 examples/messages/               JSON examples of every task message and event (contract #2)
@@ -291,6 +293,8 @@ bench/                           benchmarks, design doc 11 (Person A, Day 6)
   bench/run.py                   E1-E3 with the real atsd + Redis + sim workers -> results/dist.csv
   bench/sim.py also runs E4      critical path vs FIFO on 100 random layered DAGs -> results/e4.csv
   bench/e5.py                    E5: speculation on a straggler fan-out, paired seeds; p50/p95/p99 latency profile
+  bench/e9.py                    E9: accuracy on public datasets, workflow vs one LLM call (Groq)
+  bench/datasets/                ParallelQA, HotpotQA comparison and movie recommendation samples, with sources and licenses
   bench/e7.py                    E7: real requests, distributed vs sequential agent vs one large call (Groq)
   bench/e8.py                    E8: open-ended requests, runtime expansion vs a static plan (Groq)
   bench/live.py                  shared by E7/E8: counting planner, stack API client, atsd event log, cost
@@ -473,6 +477,7 @@ First results (`bench/results/summary.md`, 1 repeat, 26 runs, all SUCCEEDED):
 - [x] Speculative execution in atsd (D56, design doc 8.8), `ATSD_SPECULATION=1`: one backup for a RUNNING attempt past 1.5x the p90 of its task type, only with spare capacity after normal dispatch; first committed result wins; a failed or lost primary hands over to the backup without a retry; backups outside the retry budget; attempt ids unique across restarts
 - [x] E5 (`bench/e5.py`, `make bench-e5`): straggler fan-out on the real atsd, Redis and sim workers, 40 paired seeds. Median makespan 2.21 s -> 0.83 s (-63 %), p99 3.32 s -> 2.47 s (-26 %), p95 unchanged (2.22 s: a backup straggles too, one backup per task), median +6 % worker time; `bench/results/e5_tail.png`
 - [x] Latency profile (overhead profiling) from atsd's event log and the workers' events: dispatch -> worker start p50 1 ms / p99 3 ms, worker completion -> atsd p50 1 ms / p99 3 ms, parent done -> child dispatched p50 2 ms / p99 3.2 ms (`summary.md`, `REPORT.md` E5)
+- [x] E9 (`bench/e9.py`, `make bench-e9`, D57): accuracy on public datasets with reference answers (ParallelQA 113, HotpotQA comparison 200, movie recommendation 100; `bench/datasets/`), the workflow vs one LLM call on the same model and question, scored like LLMCompiler (numbers within 10 %, otherwise normalised exact match) plus token-F1, by number of entities; token budget and resume for the free tier. Not run yet (needs GROQ_API_KEY)
 - [x] 12 fake-clock unit tests (backup and first-result-wins, primary still wins, off by default, sample minimum, spare capacity only, primary failed / lost -> takeover, failed backup, retry budget and unique ids, permanent failure, drain, janitor), 1 end-to-end test (a forced straggler is backed up and the backup commits), 4 bench tests
 - [ ] Review D39 and D45. Notes: both look correct as implemented; possible change, not made: cap `retry_after_ms` (e.g. at 60 s) so one bad hint cannot pause a whole capability for long
 
