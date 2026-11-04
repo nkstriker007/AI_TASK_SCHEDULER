@@ -101,6 +101,62 @@ cd planner && uv run --env-file ../.env python -m planner.eval
 uv run python -m planner.eval --fake company_research   # offline plumbing check
 ```
 
+## Tests and benchmarks
+
+Everything below runs from the repo root. Ubuntu / Debian setup (the macOS one is above):
+
+```bash
+sudo apt install -y build-essential cmake libhiredis-dev redis-server   # compiler, CMake, hiredis for atsd, Redis for tests
+curl -LsSf https://astral.sh/uv/install.sh | sh                          # uv, the Python toolchain
+make build                                                               # must print "atsd: building with hiredis"
+```
+
+### Correctness: pass/fail
+
+| command | what it checks | time | needs |
+|---|---|---|---|
+| `make test` | everything below except chaos: C++ unit tests (ctest), C++ against a real Redis, planner, worker, API, bench and parity tests, atsd end to end, the in-process chaos test | ~4 min | redis-server, hiredis |
+| `make cpp-test` | C++ only: graph, state machine, policies, simulator, atsd with a fake bus and clock (deadlines, retries, restart, janitor, expansion, speculation), `ats_redis_tests` against a real Redis | ~1 min | hiredis (Redis tests skip without redis-server) |
+| `make py-test` | planner, worker, API, bench, parity | ~2 min | redis-server |
+| `make e2e` | the real atsd binary with real workers and Redis: two concurrent requests, a dead worker recovered at its deadline, SIGTERM drain and resume, `kill -9` and resume, fair share vs FIFO, the janitor, dynamic expansion, speculation | ~20 s | atsd built, redis-server |
+| `make parity` | the C++ and Python validators agree on every fixture | seconds | — |
+| `make chaos` | the Docker stack with injected faults (errors, 429s, hangs, stragglers, crashes) while worker containers are killed mid-task; every request must succeed with 0 duplicate commits | a few minutes | Docker |
+
+Tests that need Redis start a throwaway `redis-server` and skip when there is none, so check the output for
+`SKIPPED`. A green run of `make test` ends with every suite reporting `passed` and ctest reporting `100% tests passed`.
+
+### Performance: numbers
+
+These produce measurements, not pass/fail. Output goes to `bench/results/` (CSV, PNG and `summary.md`, a
+table for every experiment); `docs/REPORT.md` interprets them.
+
+| command | experiments | time | cost |
+|---|---|---|---|
+| `make bench` | simulator sweep (speedup at 1–16 workers, FIFO vs critical path) and **E4** (critical path vs FIFO, 100 random DAGs) | seconds | free, no Redis |
+| `make bench-dist` | the above plus **E1** (distributed vs simulator), **E2** (scaling, measured), **E3** (overhead per task, break-even task length), on the real atsd and Redis with sim workers; `REPEATS=5` for spread | ~1 min | free |
+| `make bench-e5` | **E5** (speculative execution on a straggler fan-out, 40 paired seeds: p50 / p95 / p99 makespan, extra worker time) and the **latency profile** (p50 / p95 / p99 per scheduling step); `REPEATS=10` for a quick run | ~3.5 min | free |
+| `make chaos` | **E6** (fault tolerance: completion, retries, lost attempts, duplicate commits) | a few minutes | free, Docker |
+| `make up-llm && make live-bench` | **E7** (real requests: distributed vs a sequential agent vs one large call) and **E8** (runtime expansion vs a static plan) | ~30 min | Groq free tier (rate-limited; 200k tokens/day) |
+
+Sim tasks are timed sleeps, so E1–E6 are free and repeatable and isolate the runtime's own cost; E7 and E8
+use real LLM calls. Rerun `make bench` after the others to regenerate every plot and `summary.md`.
+
+### Results so far
+
+| what | result | measured on |
+|---|---|---|
+| overhead vs the simulator (E1) | the distributed runtime is 1.6–5.8 % slower than the simulated schedule, 4 workers | sim tasks, real atsd + Redis |
+| scaling (E2) | 10.8x on a 32-task fan-out at 16 workers (theoretical 11x); a layered graph saturates at its bound (3.26x vs 3.25x); a chain never speeds up | sim tasks |
+| overhead per step (E3) | 3–6 ms per scheduling step; 90 % efficiency at 50 ms tasks, 99 % from 0.5 s; break-even ≈ 3 ms | sim tasks |
+| latency profile | dispatch → worker start p50 1 ms / p99 3 ms; worker done → atsd p50 1 ms / p99 3 ms; parent done → child dispatched p50 2 ms / p99 3.2 ms | sim tasks, 1,442 attempts |
+| critical path vs FIFO (E4) | median 4.9–5.3 % shorter makespan with 2–3 workers (best 23 %); ties at the graph's width | simulator, 100 DAGs |
+| speculation (E5) | median makespan 2.21 s → 0.83 s (−63 %), p99 3.32 s → 2.47 s (−26 %), p95 unchanged; +6 % median worker time | sim tasks, 40 paired seeds |
+| fault tolerance (E6) | 6 requests, 3 workers killed, 20 retries, 4 lost attempts recovered: all succeeded, 0 duplicate commits; on real Groq a killed worker's task was retried and the request succeeded | Docker stack; real Groq |
+| real requests (E7) | parallel beat a sequential agent by 23 % when the rate limit allowed 2 calls at once (10.5 s vs 13.6 s); one large call was fastest (4–7 s); the planner is 31–52 % of latency on light requests | Groq free tier, 1 run per mode |
+| expansion (E8) | splicing takes 1 ms and adds no planner calls; with no item count given, expansion found 10 items against a static plan's guessed 5 | Groq free tier |
+
+E7 and E8 are single runs on a rate-limited free tier: indicative, not statistically tight.
+
 ## Distributed runtime (Day 3)
 
 `atsd` (C++, `scheduler/tools/atsd.cpp`) is the scheduler service: it reads requests from the API,
